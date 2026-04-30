@@ -1,20 +1,20 @@
 """
-相机采集模块
+相机采集模块 (实测可用版)
+========================
 
-支持:
-  - 普通 USB 摄像头 (OpenCV VideoCapture)
-  - 奥比中光 Gemini 2 深度相机 (pyorbbecsdk)
+Orbbec 深度摄像头:
+  - RGB: 通过 OpenCV AVFoundation 读取 (camera index 1)
+  - 深度: 通过 pyorbbecsdk v1 读取 (编译安装)
 
-使用:
-  # 普通 USB 摄像头
-  cam = Camera(device=0)
+设备信息:
+  - 型号: SV1301S_U3 (Orbbec)
+  - RGB PID: 0x0511 (Sonix)
+  - 深度 PID: 0x0614 (Orbbec)
+  - 深度流: 640x400 @ 30fps
+  - RGB 流: 1920x1080 (AVFoundation)
 
-  # Gemini 2 深度相机
-  cam = Camera(device="gemini2")
-
-  cam.start()
-  color, depth = cam.read()   # depth 为 None (USB) 或 np.ndarray (Gemini2)
-  cam.stop()
+注意: RGB 和深度来自不同 pipeline，分辨率不同，
+      使用时需要对齐或分别处理。
 """
 
 import numpy as np
@@ -36,7 +36,7 @@ class CameraIntrinsics:
     cy: float = 0.0
     width: int = 640
     height: int = 480
-    dist_coeffs: np.ndarray = None  # 畸变系数 [k1, k2, p1, p2, k3]
+    dist_coeffs: np.ndarray = None
 
     def __post_init__(self):
         if self.dist_coeffs is None:
@@ -44,7 +44,6 @@ class CameraIntrinsics:
 
     @property
     def matrix(self) -> np.ndarray:
-        """3×3 内参矩阵"""
         return np.array([
             [self.fx, 0, self.cx],
             [0, self.fy, self.cy],
@@ -54,55 +53,126 @@ class CameraIntrinsics:
 
 class Camera:
     """
-    统一相机接口
+    Orbbec RGBD 相机
+
+    RGB 通过 OpenCV AVFoundation, 深度通过 pyorbbecsdk。
 
     Args:
-        device: 设备标识
-            - int: OpenCV 设备号 (0, 1, ...)
-            - "gemini2": 奥比中光 Gemini 2
-        width: 图像宽度
-        height: 图像高度
-        fps: 帧率
+        rgb_device: OpenCV camera index for RGB (default 1 = Orbbec USB Camera)
+        rgb_width: RGB 图像宽度
+        rgb_height: RGB 图像高度
+        enable_depth: 是否启用深度
     """
 
     def __init__(
         self,
-        device=0,
-        width: int = 640,
-        height: int = 480,
-        fps: int = 30,
+        rgb_device: int = 1,
+        rgb_width: int = 640,
+        rgb_height: int = 480,
+        enable_depth: bool = True,
     ):
-        self.device = device
-        self.width = width
-        self.height = height
-        self.fps = fps
+        self.rgb_device = rgb_device
+        self.rgb_width = rgb_width
+        self.rgb_height = rgb_height
+        self.enable_depth = enable_depth
 
-        self._cap = None
+        self._cap: Optional[cv2.VideoCapture] = None
         self._ob_pipeline = None
-        self._intrinsics = None
+        self._ob_config = None
+        self._depth_intrinsics: Optional[CameraIntrinsics] = None
         self._running = False
-
-        self._is_gemini = isinstance(device, str) and "gemini" in device.lower()
 
     def start(self):
         """启动相机"""
-        if self._is_gemini:
-            self._start_gemini()
-        else:
-            self._start_opencv()
+        # RGB via OpenCV
+        logger.info(f"启动 RGB (AVFoundation device {self.rgb_device})")
+        self._cap = cv2.VideoCapture(self.rgb_device)
+        if not self._cap.isOpened():
+            raise RuntimeError(f"无法打开 RGB 相机 (device {self.rgb_device})")
+
+        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.rgb_width)
+        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.rgb_height)
+        actual_w = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_h = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        logger.info(f"RGB 分辨率: {actual_w}x{actual_h}")
+
+        # 预热 — 前几帧可能黑屏
+        for _ in range(5):
+            self._cap.read()
+            time.sleep(0.1)
+
+        # 深度 via pyorbbecsdk
+        if self.enable_depth:
+            self._start_depth()
+
         self._running = True
-        logger.info(f"Camera started: {self.device} ({self.width}x{self.height}@{self.fps})")
+        logger.info("相机启动完成")
+
+    def _start_depth(self):
+        """启动 Orbbec 深度流"""
+        try:
+            from pyorbbecsdk import Context, Pipeline, Config, OBSensorType
+        except ImportError:
+            logger.warning("pyorbbecsdk 未安装，深度不可用")
+            self.enable_depth = False
+            return
+
+        try:
+            ctx = Context()
+            device_list = ctx.query_devices()
+            if device_list.get_count() == 0:
+                logger.warning("未找到 Orbbec 深度设备")
+                self.enable_depth = False
+                return
+
+            device = device_list.get_device_by_index(0)
+            info = device.get_device_info()
+            logger.info(f"Orbbec 设备: {info.get_name()}, SN: {info.get_serial_number()}")
+
+            self._ob_pipeline = Pipeline(device)
+            config = Config()
+
+            profile_list = self._ob_pipeline.get_stream_profile_list(OBSensorType.DEPTH_SENSOR)
+            profile = profile_list.get_default_video_stream_profile()
+            config.enable_stream(profile)
+
+            depth_w = profile.get_width()
+            depth_h = profile.get_height()
+            depth_fps = profile.get_fps()
+            logger.info(f"深度流: {depth_w}x{depth_h} @ {depth_fps}fps")
+
+            self._ob_pipeline.start(config)
+
+            # 估算深度内参
+            self._depth_intrinsics = CameraIntrinsics(
+                fx=depth_w * 0.85,
+                fy=depth_w * 0.85,
+                cx=depth_w / 2,
+                cy=depth_h / 2,
+                width=depth_w,
+                height=depth_h,
+            )
+
+        except Exception as e:
+            logger.error(f"深度启动失败: {e}")
+            self.enable_depth = False
+            self._ob_pipeline = None
 
     def stop(self):
         """停止相机"""
-        if self._is_gemini:
-            self._stop_gemini()
-        else:
-            if self._cap:
-                self._cap.release()
-                self._cap = None
+        if self._cap:
+            self._cap.release()
+            self._cap = None
+
+        if self._ob_pipeline:
+            try:
+                self._ob_pipeline.stop()
+            except:
+                pass
+            self._ob_pipeline = None
+
         self._running = False
-        logger.info("Camera stopped")
+        logger.info("相机已停止")
 
     def read(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """
@@ -114,138 +184,83 @@ class Camera:
             - depth_image: uint16 毫米, shape (H, W) 或 None
         """
         if not self._running:
-            raise RuntimeError("Camera not started")
+            raise RuntimeError("相机未启动")
 
-        if self._is_gemini:
-            return self._read_gemini()
-        else:
-            return self._read_opencv()
+        color = self._read_rgb()
+        depth = self._read_depth() if self.enable_depth else None
+
+        return color, depth
+
+    def read_rgb(self) -> Optional[np.ndarray]:
+        """只读取 RGB"""
+        return self._read_rgb()
+
+    def read_depth(self) -> Optional[np.ndarray]:
+        """只读取深度"""
+        return self._read_depth()
+
+    def _read_rgb(self) -> Optional[np.ndarray]:
+        if self._cap is None:
+            return None
+        ret, frame = self._cap.read()
+        if not ret:
+            return None
+        # 如果分辨率不是目标大小，resize
+        h, w = frame.shape[:2]
+        if w != self.rgb_width or h != self.rgb_height:
+            frame = cv2.resize(frame, (self.rgb_width, self.rgb_height))
+        return frame
+
+    def _read_depth(self) -> Optional[np.ndarray]:
+        if self._ob_pipeline is None:
+            return None
+        try:
+            frames = self._ob_pipeline.wait_for_frames(500)
+            if frames is None:
+                return None
+            depth_frame = frames.get_depth_frame()
+            if depth_frame is None:
+                return None
+            w = depth_frame.get_width()
+            h = depth_frame.get_height()
+            data = np.frombuffer(depth_frame.get_data(), dtype=np.uint16).reshape(h, w)
+            return data
+        except Exception as e:
+            logger.debug(f"深度读取失败: {e}")
+            return None
 
     @property
     def intrinsics(self) -> CameraIntrinsics:
-        """相机内参 (标定后可用)"""
-        if self._intrinsics is None:
-            # 返回默认估计值
-            self._intrinsics = CameraIntrinsics(
-                fx=self.width * 0.8,
-                fy=self.width * 0.8,
-                cx=self.width / 2,
-                cy=self.height / 2,
-                width=self.width,
-                height=self.height,
-            )
-        return self._intrinsics
-
-    def set_intrinsics(self, intrinsics: CameraIntrinsics):
-        """设置标定后的内参"""
-        self._intrinsics = intrinsics
-
-    def undistort(self, image: np.ndarray) -> np.ndarray:
-        """去畸变"""
-        intr = self.intrinsics
-        return cv2.undistort(image, intr.matrix, intr.dist_coeffs)
-
-    # ─── OpenCV 后端 ────────────────────────────────────────
-
-    def _start_opencv(self):
-        self._cap = cv2.VideoCapture(self.device)
-        if not self._cap.isOpened():
-            raise RuntimeError(f"Cannot open camera {self.device}")
-
-        self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        self._cap.set(cv2.CAP_PROP_FPS, self.fps)
-
-        # 读取实际分辨率
-        self.width = int(self._cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        self.height = int(self._cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
-    def _read_opencv(self) -> Tuple[Optional[np.ndarray], None]:
-        ret, frame = self._cap.read()
-        if not ret:
-            return None, None
-        return frame, None
-
-    # ─── 奥比中光 Gemini 2 后端 ──────────────────────────────
-
-    def _start_gemini(self):
-        """启动 Gemini 2 (需要 pyorbbecsdk)"""
-        try:
-            from pyorbbecsdk import Pipeline, Config, OBSensorType, OBFormat
-        except ImportError:
-            raise ImportError(
-                "pyorbbecsdk not installed. Install with:\n"
-                "  pip install pyorbbecsdk\n"
-                "Or download from: https://github.com/orbbec/pyorbbecsdk"
-            )
-
-        self._ob_pipeline = Pipeline()
-        config = Config()
-
-        # 配置彩色流
-        color_profiles = self._ob_pipeline.get_stream_profile_list(OBSensorType.COLOR_SENSOR)
-        color_profile = color_profiles.get_video_stream_profile(
-            self.width, self.height, OBFormat.RGB888, self.fps
+        """深度相机内参"""
+        if self._depth_intrinsics:
+            return self._depth_intrinsics
+        return CameraIntrinsics(
+            fx=self.rgb_width * 0.8,
+            fy=self.rgb_width * 0.8,
+            cx=self.rgb_width / 2,
+            cy=self.rgb_height / 2,
+            width=self.rgb_width,
+            height=self.rgb_height,
         )
-        if color_profile is None:
-            color_profile = color_profiles.get_default_video_stream_profile()
-            logger.warning(f"Requested color profile not available, using default")
-        config.enable_stream(color_profile)
 
-        # 配置深度流
-        depth_profiles = self._ob_pipeline.get_stream_profile_list(OBSensorType.DEPTH_SENSOR)
-        depth_profile = depth_profiles.get_default_video_stream_profile()
-        config.enable_stream(depth_profile)
+    def save_snapshot(self, path: str = "snapshot") -> Tuple[str, Optional[str]]:
+        """保存 RGB + 深度快照"""
+        color, depth = self.read()
+        rgb_path = f"{path}_rgb.jpg"
+        depth_path = None
 
-        # 启用对齐 (深度对齐到彩色)
-        config.set_align_mode(True)
+        if color is not None:
+            cv2.imwrite(rgb_path, color)
 
-        self._ob_pipeline.start(config)
+        if depth is not None:
+            depth_path = f"{path}_depth.png"
+            cv2.imwrite(depth_path, depth)
+            # 也保存伪彩色版
+            depth_vis = cv2.normalize(depth, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+            depth_color = cv2.applyColorMap(depth_vis, cv2.COLORMAP_JET)
+            cv2.imwrite(f"{path}_depth_vis.jpg", depth_color)
 
-        # 获取内参
-        try:
-            cam_params = self._ob_pipeline.get_camera_param()
-            intr = cam_params.rgb_intrinsic
-            self._intrinsics = CameraIntrinsics(
-                fx=intr.fx, fy=intr.fy,
-                cx=intr.cx, cy=intr.cy,
-                width=int(intr.width), height=int(intr.height),
-                dist_coeffs=np.array([
-                    intr.k1, intr.k2, intr.p1, intr.p2, intr.k3
-                ]),
-            )
-            logger.info(f"Gemini 2 intrinsics: fx={intr.fx:.1f}, fy={intr.fy:.1f}")
-        except Exception as e:
-            logger.warning(f"Could not get intrinsics: {e}")
-
-    def _stop_gemini(self):
-        if self._ob_pipeline:
-            self._ob_pipeline.stop()
-            self._ob_pipeline = None
-
-    def _read_gemini(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        frameset = self._ob_pipeline.wait_for_frameset(1000)
-        if frameset is None:
-            return None, None
-
-        color_frame = frameset.get_color_frame()
-        depth_frame = frameset.get_depth_frame()
-
-        color_image = None
-        depth_image = None
-
-        if color_frame:
-            color_data = np.frombuffer(color_frame.get_data(), dtype=np.uint8)
-            color_image = color_data.reshape((color_frame.get_height(), color_frame.get_width(), 3))
-            color_image = cv2.cvtColor(color_image, cv2.COLOR_RGB2BGR)
-
-        if depth_frame:
-            depth_data = np.frombuffer(depth_frame.get_data(), dtype=np.uint16)
-            depth_image = depth_data.reshape((depth_frame.get_height(), depth_frame.get_width()))
-
-        return color_image, depth_image
-
-    # ─── 上下文管理器 ────────────────────────────────────────
+        return rgb_path, depth_path
 
     def __enter__(self):
         self.start()
@@ -262,17 +277,7 @@ def pixel_to_3d(
     depth_mm: float,
     intrinsics: CameraIntrinsics,
 ) -> Tuple[float, float, float]:
-    """
-    像素坐标 + 深度 → 相机坐标系 3D 点 (mm)
-
-    Args:
-        u, v: 像素坐标
-        depth_mm: 深度值 (毫米)
-        intrinsics: 相机内参
-
-    Returns:
-        (x, y, z) 相机坐标系下的 3D 坐标 (mm)
-    """
+    """像素坐标 + 深度 → 相机坐标系 3D 点 (mm)"""
     z = depth_mm
     x = (u - intrinsics.cx) * z / intrinsics.fx
     y = (v - intrinsics.cy) * z / intrinsics.fy
@@ -284,28 +289,13 @@ def get_depth_at(
     u: int, v: int,
     kernel_size: int = 5,
 ) -> float:
-    """
-    获取像素点的深度值 (取邻域中值，更鲁棒)
-
-    Args:
-        depth_image: 深度图 (uint16, mm)
-        u, v: 像素坐标
-        kernel_size: 取值邻域大小
-
-    Returns:
-        深度值 (mm), 无效返回 0
-    """
+    """获取像素点深度值 (邻域中值)"""
     h, w = depth_image.shape
     half = kernel_size // 2
-    y1 = max(0, v - half)
-    y2 = min(h, v + half + 1)
-    x1 = max(0, u - half)
-    x2 = min(w, u + half + 1)
+    y1, y2 = max(0, v - half), min(h, v + half + 1)
+    x1, x2 = max(0, u - half), min(w, u + half + 1)
 
     patch = depth_image[y1:y2, x1:x2]
     valid = patch[patch > 0]
 
-    if len(valid) == 0:
-        return 0.0
-
-    return float(np.median(valid))
+    return float(np.median(valid)) if len(valid) > 0 else 0.0
