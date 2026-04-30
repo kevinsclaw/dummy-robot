@@ -284,6 +284,38 @@ ser = serial.Serial('/dev/cu.usbmodem2067307F534B1', 115200, timeout=2)
 @227.5,0,324.5,0,90,0 → 末端回零，到位 ✓
 ```
 
+### 夹爪控制 ✅
+
+**关键发现：夹爪通过 J6 机械联动控制，不是独立 CAN 设备！**
+
+J6 旋转通过齿轮/连杆机构带动夹爪开合：
+
+| 动作 | J6 角度 | 示例命令 |
+|------|---------|----------|
+| 夹爪张开 | 负值 | `&0,0,90,0,0,-60` |
+| 夹爪合拢 | 正值 | `&0,0,90,0,0,60` |
+| 夹爪半开 | 零位 | `&0,0,90,0,0,0` |
+
+**注意：**
+- J6 范围 -720° ~ +720°，但夹爪实际开合行程约 ±60° 就够
+- 夹爪驱动板上有步进电机+LED（灯亮说明上电正常），但它可能是做差动控制用的
+- `DummyHand` (fibre 协议, CAN ID 7) 发命令夹爪不响应
+- 夹爪电机响应 CAN 广播（ID 0），但不响应 DummyHand 单播
+- 最终确认 J6 机械联动才是控制夹爪的正确方式
+
+#### fibre 协议控制（备忘）
+
+虽然夹爪不走 fibre，但 fibre USB Native endpoint 可用于高级控制：
+
+```python
+# USB Interface 2 (EP 0x03 OUT / 0x83 IN) = fibre native endpoint
+import usb.core
+dev = usb.core.find(idVendor=0x1209, idProduct=0x0D32)
+# 可访问: robot.joint_1~6.angle, robot.hand.set_angle(), robot.set_enable() 等
+```
+
+需要安装: `pip3 install pyusb`
+
 ---
 
 ## 总结
