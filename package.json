@@ -1,0 +1,29 @@
+{
+  "name": "@my-project/source",
+  "version": "0.0.0",
+  "license": "MIT",
+  "scripts": {
+    "build": "nx run-many --target build",
+    "lint": "nx run-many --target lint --configuration=fix",
+    "build:skip-lint": "nx run-many --target build --configuration=skip-lint",
+    "build:all": "nx run-many --target build --all",
+    "affected:all": "nx affected --target build"
+  },
+  "private": true,
+  "dependencies": {
+    "@aws/nx-plugin": "0.115.1"
+  },
+  "devDependencies": {
+    "@nx/js": "22.7.2",
+    "@nx/workspace": "22.7.2",
+    "@swc-node/register": "~1.11.1",
+    "@swc/core": "~1.15.5",
+    "@swc/helpers": "~0.5.18",
+    "nx": "22.7.2",
+    "prettier": "~3.6.2",
+    "tslib": "^2.3.0",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.59.3"
+  },
+  "type": "module"
+}
