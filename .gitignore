@@ -3,3 +3,6 @@ __pycache__/
 .venv/
 *.rar
 .DS_Store
+vm.zip
+*.jpg
+*.png
