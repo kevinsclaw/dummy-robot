@@ -16,6 +16,14 @@
     "skipLibCheck": true,
     "strict": true,
     "target": "es2022",
-    "customConditions": ["@my-project/source"]
+    "customConditions": ["@ar4-sim/source"],
+    "rootDir": ".",
+    "paths": {
+      ":ar4-sim/sim-for-ar4": ["./packages/sim-for-ar4/src/index.ts"],
+      ":ar4-sim/common-constructs": [
+        "./packages/common/constructs/src/index.ts"
+      ],
+      ":ar4-sim/infra": ["./packages/infra/src/index.ts"]
+    }
   }
 }

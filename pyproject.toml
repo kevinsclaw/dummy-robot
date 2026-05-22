@@ -1,0 +1,27 @@
+[project]
+name = "nx-workspace"
+version = "1.0.0"
+dependencies = [ "ar4_sim.agent_connection", "ar4_sim.ar4_robot_agent" ]
+
+[tool.uv.workspace]
+members = [
+  "packages/ar4-robot-agent/ar4_robot_agent",
+  "packages/common/agent_connection"
+]
+
+[tool.uv.sources."ar4_sim.agent_connection"]
+workspace = true
+
+[tool.uv.sources."ar4_sim.ar4_robot_agent"]
+workspace = true
+
+[dependency-groups]
+dev = [
+  "ruff>=0.8.2",
+  "autopep8>=2.3.1",
+  "pytest>=8.3.4",
+  "pytest-sugar>=1.0.0",
+  "pytest-cov>=6.0.0",
+  "pytest-html>=4.1.1",
+  "ty==0.0.37"
+]

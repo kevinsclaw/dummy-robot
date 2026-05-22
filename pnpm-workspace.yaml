@@ -1,5 +1,6 @@
 packages:
-  - packages/*
+  - 'packages/*'
+  - 'packages/common/*'
 allowBuilds:
   '@swc/core': true
   esbuild: true
@@ -7,6 +8,6 @@ allowBuilds:
   sharp: true
 onlyBuiltDependencies:
   - '@swc/core'
-  - esbuild
-  - nx
-  - sharp
+  - 'esbuild'
+  - 'nx'
+  - 'sharp'

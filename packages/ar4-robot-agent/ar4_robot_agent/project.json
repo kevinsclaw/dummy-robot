@@ -1,0 +1,225 @@
+{
+  "name": "ar4_sim.ar4_robot_agent",
+  "$schema": "../../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "sourceRoot": "packages/ar4-robot-agent/ar4_robot_agent/ar4_sim_ar4_robot_agent",
+  "release": {
+    "version": {
+      "versionActions": "@nxlv/python/release/version-actions"
+    }
+  },
+  "tags": [],
+  "metadata": {
+    "generator": "py#project",
+    "ports": [8081],
+    "components": [
+      {
+        "generator": "py#strands-agent",
+        "path": "ar4_sim_ar4_robot_agent/agent",
+        "name": "agent",
+        "port": 8081,
+        "rc": "Ar4RobotAgentAgent",
+        "auth": "IAM",
+        "protocol": "HTTP"
+      }
+    ]
+  },
+  "targets": {
+    "add": {
+      "executor": "@nxlv/python:add",
+      "options": {}
+    },
+    "agent-chat": {
+      "executor": "nx:run-commands",
+      "options": {
+        "commands": ["tsx ./scripts/agent/chat.ts"],
+        "cwd": "{projectRoot}",
+        "env": {
+          "URL": "http://localhost:8081"
+        }
+      },
+      "dependsOn": ["agent-generate-client", "agent-serve-local"]
+    },
+    "agent-docker": {
+      "cache": true,
+      "executor": "nx:run-commands",
+      "options": {
+        "commands": [
+          "rimraf dist/packages/ar4-robot-agent/ar4_robot_agent/docker/ar4-robot-agent-agent",
+          "make-dir dist/packages/ar4-robot-agent/ar4_robot_agent/docker/ar4-robot-agent-agent",
+          "ncp dist/packages/ar4-robot-agent/ar4_robot_agent/bundle-arm dist/packages/ar4-robot-agent/ar4_robot_agent/docker/ar4-robot-agent-agent",
+          "ncp packages/ar4-robot-agent/ar4_robot_agent/ar4_sim_ar4_robot_agent/agent/Dockerfile dist/packages/ar4-robot-agent/ar4_robot_agent/docker/ar4-robot-agent-agent/Dockerfile",
+          "docker build --platform linux/arm64 -t ar4-sim-ar4-robot-agent-agent:latest dist/packages/ar4-robot-agent/ar4_robot_agent/docker/ar4-robot-agent-agent"
+        ],
+        "parallel": false
+      },
+      "dependsOn": ["bundle-arm"]
+    },
+    "agent-generate-client": {
+      "cache": true,
+      "executor": "nx:run-commands",
+      "inputs": [
+        {
+          "dependentTasksOutputFiles": "**/*.json"
+        }
+      ],
+      "outputs": ["{projectRoot}/scripts/agent/generated"],
+      "options": {
+        "commands": [
+          "nx g @aws/nx-plugin:open-api#ts-client --openApiSpecPath=\"dist/packages/ar4-robot-agent/ar4_robot_agent/openapi/agent/openapi.json\" --outputPath=\"packages/ar4-robot-agent/ar4_robot_agent/scripts/agent/generated\" --no-interactive"
+        ]
+      },
+      "dependsOn": ["agent-openapi"]
+    },
+    "agent-openapi": {
+      "cache": true,
+      "executor": "nx:run-commands",
+      "outputs": ["{workspaceRoot}/dist/{projectRoot}/openapi/agent"],
+      "options": {
+        "commands": [
+          "uv run python {projectRoot}/scripts/agent_openapi.py \"dist/{projectRoot}/openapi/agent/openapi.json\""
+        ]
+      }
+    },
+    "agent-serve": {
+      "executor": "nx:run-commands",
+      "options": {
+        "commands": [
+          "uv run fastapi dev ar4_sim_ar4_robot_agent/agent/main.py --port 8081"
+        ],
+        "cwd": "{projectRoot}",
+        "env": {
+          "PORT": "8081"
+        }
+      },
+      "continuous": true
+    },
+    "agent-serve-local": {
+      "executor": "nx:run-commands",
+      "options": {
+        "commands": [
+          "uv run fastapi dev ar4_sim_ar4_robot_agent/agent/main.py --port 8081"
+        ],
+        "cwd": "{projectRoot}",
+        "env": {
+          "PORT": "8081",
+          "SERVE_LOCAL": "true"
+        }
+      },
+      "continuous": true
+    },
+    "build": {
+      "inputs": ["default", "^production"],
+      "dependsOn": ["lint", "compile", "test", "typecheck", "bundle", "docker"],
+      "options": {
+        "outputPath": "{workspaceRoot}/dist/{projectRoot}"
+      }
+    },
+    "bundle": {
+      "dependsOn": ["bundle-arm"]
+    },
+    "bundle-arm": {
+      "cache": true,
+      "inputs": ["default", "^production"],
+      "executor": "nx:run-commands",
+      "outputs": ["{workspaceRoot}/dist/{projectRoot}/bundle-arm"],
+      "options": {
+        "commands": [
+          "uv export --frozen --no-dev --no-editable --project {projectRoot} --package ar4_sim.ar4_robot_agent -o dist/{projectRoot}/bundle-arm/requirements.txt",
+          "uv pip install -n --no-deps --no-installer-metadata --no-compile-bytecode --python-platform aarch64-manylinux_2_28 --target dist/{projectRoot}/bundle-arm -r dist/{projectRoot}/bundle-arm/requirements.txt"
+        ],
+        "parallel": false
+      },
+      "dependsOn": ["compile"]
+    },
+    "compile": {
+      "executor": "@nxlv/python:build",
+      "outputs": ["{workspaceRoot}/dist/{projectRoot}/build"],
+      "options": {
+        "outputPath": "{workspaceRoot}/dist/{projectRoot}/build",
+        "publish": false,
+        "lockedVersions": true,
+        "bundleLocalDependencies": true
+      },
+      "cache": true,
+      "inputs": ["default", "^production"]
+    },
+    "docker": {
+      "dependsOn": ["agent-docker"]
+    },
+    "format": {
+      "executor": "@nxlv/python:ruff-format",
+      "outputs": [],
+      "options": {
+        "filePatterns": ["ar4_sim_ar4_robot_agent", "tests"]
+      },
+      "cache": true
+    },
+    "install": {
+      "executor": "@nxlv/python:install",
+      "options": {
+        "silent": false,
+        "args": "",
+        "verbose": false,
+        "debug": false
+      }
+    },
+    "lint": {
+      "executor": "@nxlv/python:ruff-check",
+      "outputs": [],
+      "options": {
+        "lintFilePatterns": ["ar4_sim_ar4_robot_agent", "tests"]
+      },
+      "cache": true,
+      "inputs": ["default", "^production"],
+      "dependsOn": ["format"],
+      "configurations": {
+        "fix": {
+          "fix": true
+        },
+        "skip-lint": {
+          "exitZero": true
+        }
+      }
+    },
+    "lock": {
+      "executor": "@nxlv/python:lock",
+      "options": {
+        "update": false
+      }
+    },
+    "remove": {
+      "executor": "@nxlv/python:remove",
+      "options": {}
+    },
+    "sync": {
+      "executor": "@nxlv/python:sync",
+      "options": {}
+    },
+    "test": {
+      "executor": "@nxlv/python:run-commands",
+      "outputs": [
+        "{workspaceRoot}/reports/{projectRoot}/unittests",
+        "{workspaceRoot}/coverage/{projectRoot}"
+      ],
+      "options": {
+        "command": "uv run pytest tests/",
+        "cwd": "{projectRoot}"
+      },
+      "cache": true
+    },
+    "typecheck": {
+      "cache": true,
+      "inputs": ["default", "^production"],
+      "executor": "@nxlv/python:run-commands",
+      "options": {
+        "command": "uv run ty check",
+        "cwd": "{projectRoot}"
+      }
+    },
+    "update": {
+      "executor": "@nxlv/python:update",
+      "options": {}
+    }
+  }
+}

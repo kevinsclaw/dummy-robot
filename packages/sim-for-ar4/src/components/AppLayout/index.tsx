@@ -1,0 +1,178 @@
+import { useAuth } from 'react-oidc-context';
+import * as React from 'react';
+import { createContext, useCallback, useEffect, useState } from 'react';
+import Config from '../../config';
+
+import {
+  BreadcrumbGroup,
+  BreadcrumbGroupProps,
+  SideNavigation,
+  TopNavigation,
+} from '@cloudscape-design/components';
+import CloudscapeAppLayout, {
+  AppLayoutProps,
+} from '@cloudscape-design/components/app-layout';
+import {
+  useMatchRoute,
+  useLocation,
+  useNavigate,
+} from '@tanstack/react-router';
+
+const getBreadcrumbs = (
+  matchRoute: ReturnType<typeof useMatchRoute>,
+  pathName: string,
+  search: string,
+  defaultBreadcrumb: string,
+  availableRoutes?: string[],
+) => {
+  const segments = [
+    defaultBreadcrumb,
+    ...pathName.split('/').filter((segment) => segment !== ''),
+  ];
+
+  return segments.map((segment, i) => {
+    const href =
+      i === 0
+        ? '/'
+        : `/${segments
+            .slice(1, i + 1)
+            .join('/')
+            .replace('//', '/')}`;
+
+    const matched =
+      !availableRoutes || availableRoutes.find((r) => matchRoute({ to: href }));
+
+    return {
+      href: matched ? `${href}${search}` : '#',
+      text: segment,
+    };
+  });
+};
+
+export interface AppLayoutContext {
+  appLayoutProps: AppLayoutProps;
+  setAppLayoutProps: (props: AppLayoutProps) => void;
+  displayHelpPanel: (helpContent: React.ReactNode) => void;
+}
+
+/**
+ * Context for updating/retrieving the AppLayout.
+ */
+export const AppLayoutContext = createContext({
+  appLayoutProps: {},
+  // eslint-disable-next-line @typescript-eslint/no-empty-function
+  setAppLayoutProps: (_: AppLayoutProps) => {},
+  // eslint-disable-next-line @typescript-eslint/no-empty-function
+  displayHelpPanel: (_: React.ReactNode) => {},
+});
+
+/**
+ * Defines the App layout and contains logic for routing.
+ */
+const AppLayout: React.FC<React.PropsWithChildren> = ({ children }) => {
+  const { user, removeUser, signoutRedirect, clearStaleState } = useAuth();
+  const appLayout = React.useRef<AppLayoutProps.Ref>(null);
+  const [appLayoutProps, setAppLayoutProps] = useState<AppLayoutProps>({});
+  const setAppLayoutPropsSafe = useCallback(
+    (props: AppLayoutProps) => {
+      JSON.stringify(appLayoutProps) !== JSON.stringify(props) &&
+        setAppLayoutProps(props);
+    },
+    [appLayoutProps],
+  );
+
+  const navigate = useNavigate();
+  const [activeBreadcrumbs, setActiveBreadcrumbs] = useState<
+    BreadcrumbGroupProps.Item[]
+  >([{ text: '/', href: '/' }]);
+  const matchRoute = useMatchRoute();
+  const { pathname, search } = useLocation();
+
+  useEffect(() => {
+    const breadcrumbs = getBreadcrumbs(
+      matchRoute,
+      pathname,
+      Object.entries(search).reduce((p, [k, v]) => p + `${k}=${v}`, ''),
+      '/',
+    );
+    setActiveBreadcrumbs(breadcrumbs);
+  }, [pathname, search]);
+
+  const onNavigate = useCallback(
+    (e: CustomEvent<{ href: string; external?: boolean }>) => {
+      if (!e.detail.external) {
+        e.preventDefault();
+        setAppLayoutPropsSafe({
+          contentType: undefined,
+        });
+        navigate({ to: e.detail.href });
+      }
+    },
+    [navigate, setAppLayoutPropsSafe],
+  );
+
+  return (
+    <AppLayoutContext.Provider
+      value={{
+        appLayoutProps,
+        setAppLayoutProps: setAppLayoutPropsSafe,
+        displayHelpPanel: (helpContent: React.ReactNode) => {
+          setAppLayoutPropsSafe({ tools: helpContent, toolsHide: false });
+          appLayout.current?.openTools();
+        },
+      }}
+    >
+      <TopNavigation
+        identity={{
+          href: '/',
+          title: Config.applicationName,
+          logo: {
+            src: Config.logo,
+          },
+        }}
+        utilities={[
+          {
+            type: 'menu-dropdown',
+            text: `${user?.profile?.['cognito:username']}`,
+            iconName: 'user-profile-active',
+            onItemClick: (e) => {
+              if (e.detail.id === 'signout') {
+                removeUser();
+                signoutRedirect({
+                  post_logout_redirect_uri: window.location.origin,
+                  extraQueryParams: {
+                    redirect_uri: window.location.origin,
+                    response_type: 'code',
+                  },
+                });
+                clearStaleState();
+              }
+            },
+            items: [{ id: 'signout', text: 'Sign out' }],
+          },
+        ]}
+      />
+      <CloudscapeAppLayout
+        ref={appLayout}
+        breadcrumbs={
+          <BreadcrumbGroup onFollow={onNavigate} items={activeBreadcrumbs} />
+        }
+        navigation={
+          <SideNavigation
+            header={{ text: Config.applicationName, href: '/' }}
+            activeHref={pathname}
+            onFollow={onNavigate}
+            items={[
+              { text: 'Simulator', type: 'link', href: '/' },
+            ]}
+          />
+        }
+        toolsHide
+        content={children}
+        {...appLayoutProps}
+      />
+    </AppLayoutContext.Provider>
+  );
+};
+
+export default AppLayout;

@@ -1,0 +1,167 @@
+{
+  "name": "@ar4-sim/sim-for-ar4",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "packages/sim-for-ar4/src",
+  "projectType": "application",
+  "tags": [],
+  "metadata": {
+    "generator": "ts#react-website",
+    "uxProvider": "Cloudscape",
+    "components": [
+      {
+        "generator": "ts#react-website#runtime-config",
+        "path": "src/components/RuntimeConfig"
+      },
+      {
+        "generator": "ts#react-website#auth",
+        "path": "src/components/CognitoAuth"
+      }
+    ]
+  },
+  "targets": {
+    "build": {
+      "dependsOn": ["lint", "compile", "bundle", "test"],
+      "options": {
+        "outputPath": "dist/{projectRoot}/bundle"
+      }
+    },
+    "bundle": {
+      "executor": "@nx/vite:build",
+      "outputs": ["{options.outputPath}"],
+      "defaultConfiguration": "production",
+      "options": {
+        "outputPath": "dist/{projectRoot}/bundle"
+      },
+      "configurations": {
+        "development": {
+          "mode": "development"
+        },
+        "production": {
+          "mode": "production"
+        }
+      },
+      "dependsOn": ["generate:agent-client"]
+    },
+    "compile": {
+      "dependsOn": ["bundle", "generate:agent-client"],
+      "executor": "nx:run-commands",
+      "outputs": ["{workspaceRoot}/dist/{projectRoot}/tsc"],
+      "options": {
+        "command": "tsc --build tsconfig.app.json",
+        "cwd": "{projectRoot}"
+      }
+    },
+    "generate:agent-client": {
+      "cache": true,
+      "executor": "nx:run-commands",
+      "inputs": [
+        {
+          "dependentTasksOutputFiles": "**/*.json"
+        }
+      ],
+      "outputs": ["{workspaceRoot}/packages/sim-for-ar4/src/generated/agent"],
+      "options": {
+        "commands": [
+          "nx g @aws/nx-plugin:open-api#ts-hooks --openApiSpecPath=\"dist/packages/ar4-robot-agent/ar4_robot_agent/openapi/agent/openapi.json\" --outputPath=\"packages/sim-for-ar4/src/generated/agent\" --no-interactive"
+        ]
+      },
+      "dependsOn": ["ar4_sim.ar4_robot_agent:agent-openapi"]
+    },
+    "lint": {
+      "executor": "@nx/eslint:lint",
+      "cache": true,
+      "inputs": ["eslint"],
+      "configurations": {
+        "fix": {
+          "fix": true
+        },
+        "skip-lint": {
+          "force": true
+        }
+      }
+    },
+    "load:runtime-config": {
+      "executor": "nx:run-commands",
+      "metadata": {
+        "description": "Load runtime config from your deployed stack for dev purposes. You must set your AWS CLI credentials whilst calling 'pnpm nx run @ar4-sim/sim-for-ar4:load:runtime-config'"
+      },
+      "options": {
+        "command": "aws s3 cp s3://`aws cloudformation describe-stacks --query \"Stacks[?starts_with(StackName, 'ar4-sim-')][].Outputs[] | [?contains(OutputKey, 'SimForAr4WebsiteBucketName')].OutputValue\" --output text`/runtime-config.json \"{projectRoot}/public/runtime-config.json\""
+      }
+    },
+    "preview": {
+      "dependsOn": ["build"],
+      "executor": "@nx/vite:preview-server",
+      "defaultConfiguration": "development",
+      "options": {
+        "buildTarget": "@ar4-sim/sim-for-ar4:build"
+      },
+      "configurations": {
+        "development": {
+          "buildTarget": "@ar4-sim/sim-for-ar4:build:development"
+        },
+        "production": {
+          "buildTarget": "@ar4-sim/sim-for-ar4:build:production"
+        }
+      }
+    },
+    "serve": {
+      "executor": "@nx/vite:dev-server",
+      "defaultConfiguration": "development",
+      "options": {
+        "buildTarget": "@ar4-sim/sim-for-ar4:build"
+      },
+      "configurations": {
+        "development": {
+          "buildTarget": "@ar4-sim/sim-for-ar4:build:development",
+          "hmr": true
+        },
+        "production": {
+          "buildTarget": "@ar4-sim/sim-for-ar4:build:production",
+          "hmr": false
+        }
+      }
+    },
+    "serve-local": {
+      "executor": "@nx/vite:dev-server",
+      "options": {
+        "buildTarget": "@ar4-sim/sim-for-ar4:build:development",
+        "hmr": true,
+        "mode": "serve-local"
+      },
+      "continuous": true,
+      "dependsOn": [
+        {
+          "projects": ["ar4_sim.ar4_robot_agent"],
+          "target": "agent-serve-local"
+        },
+        "generate:agent-client",
+        "watch-generate:agent-client"
+      ]
+    },
+    "serve-static": {
+      "executor": "@nx/web:file-server",
+      "dependsOn": ["build"],
+      "options": {
+        "buildTarget": "@ar4-sim/sim-for-ar4:build",
+        "spa": true
+      }
+    },
+    "test": {
+      "executor": "@nx/vitest:test",
+      "outputs": ["{options.reportsDirectory}"],
+      "options": {
+        "reportsDirectory": "{workspaceRoot}/coverage/{projectRoot}"
+      }
+    },
+    "watch-generate:agent-client": {
+      "executor": "nx:run-commands",
+      "options": {
+        "commands": [
+          "nx watch --projects=ar4_sim.ar4_robot_agent --includeDependentProjects -- nx run @ar4-sim/sim-for-ar4:\"generate:agent-client\""
+        ]
+      },
+      "continuous": true
+    }
+  }
+}
