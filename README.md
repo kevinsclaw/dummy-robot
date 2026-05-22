@@ -1,215 +1,222 @@
-# Dummy Robot V2
+# AR4 Robot Simulator
 
-开源 6-DOF 桌面机械臂 — 基于[稚晖君 Dummy](https://github.com/peng-zhihui/Dummy-Robot) V2 版本的 LLM 智能控制方案。
+A full-stack web application for controlling and visualising the [AR4 6-DOF robot arm](https://www.anninrobotics.com/) using natural language instructions. Type a command in plain English — a Strands AI agent translates it into ROS2 commands and animates the robot in a 3D browser simulator.
 
-## 项目结构
+![AR4 Simulator](https://img.shields.io/badge/status-active-brightgreen) ![License](https://img.shields.io/badge/license-MIT-blue)
+
+---
+
+## Architecture
 
 ```
-dummy-robot/
-├── dummy-sim/       # 仿真环境 (运动学 + 3D 可视化)
-├── dummy-demo/      # 实机控制 (串口驱动 + LLM 规划 + RGBD 视觉)
-└── README.md
+┌─────────────────────────────────────────────────────────┐
+│                     Browser (React)                      │
+│                                                          │
+│  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  │
+│  │  Joint State │  │  3D Viewer   │  │  Instruction  │  │
+│  │    Panel     │  │  (Three.js)  │  │  Chat Panel   │  │
+│  └──────────────┘  └──────────────┘  └───────────────┘  │
+│                           │                  │           │
+│                    useSimulator hook          │           │
+│                           │                  │           │
+└───────────────────────────┼──────────────────┼───────────┘
+                            │                  │
+                     joint angles        SigV4 fetch
+                     (lerp animation)         │
+                                              ▼
+                              ┌───────────────────────────┐
+                              │  Strands Agent (Python)    │
+                              │  AWS Bedrock AgentCore     │
+                              │                            │
+                              │  Tools:                    │
+                              │  • move_joint              │
+                              │  • execute_pose            │
+                              │  • open/close_gripper      │
+                              │  • rotate_base             │
+                              │  • get_joint_states        │
+                              └───────────────────────────┘
 ```
 
-## 硬件
+**Infrastructure** (AWS CDK):
+- CloudFront + S3 — static website hosting
+- Cognito User Pool + Identity Pool — authentication
+- Bedrock AgentCore Runtime — containerised Strands agent (ARM64)
+- WAF — web application firewall on the CloudFront distribution
+- AppConfig — runtime configuration delivery
 
-| 组件 | 型号 |
-|------|------|
-| 机械臂 | Dummy V2 (6-DOF + 夹爪) |
-| 主控 | STM32F405 (REF 控制板) |
-| 深度相机 | Orbbec (RGB 1080p + 深度 640x400) |
-| 通信 | USB CDC 串口 (ASCII 协议) |
+---
 
-## 快速开始
+## Monorepo Structure
 
-### 仿真
+```
+packages/
+├── sim-for-ar4/              # React frontend (TypeScript)
+│   └── src/
+│       ├── components/
+│       │   ├── Ar4Simulator/ # 3D viewer, joint panel, chat UI
+│       │   ├── AppLayout/    # Cloudscape shell + navigation
+│       │   ├── CognitoAuth/  # OIDC auth wrapper
+│       │   └── RuntimeConfig/# Runtime config provider
+│       ├── hooks/            # useAgent, useSigV4, useRuntimeConfig
+│       └── routes/           # TanStack Router file-based routes
+│
+├── ar4-robot-agent/          # Strands agent backend (Python)
+│   └── ar4_robot_agent/
+│       └── ar4_sim_ar4_robot_agent/
+│           └── agent/
+│               ├── agent.py  # Tools + system prompt
+│               └── main.py   # FastAPI streaming server
+│
+├── common/
+│   ├── constructs/           # Shared CDK constructs
+│   │   └── src/
+│   │       ├── core/         # StaticWebsite, UserIdentity, RuntimeConfig
+│   │       └── app/          # SimForAr4, Ar4RobotAgentAgent
+│   └── agent_connection/     # Shared Python session/runtime-config helpers
+│
+└── infra/                    # CDK app entry point
+    └── src/
+        ├── main.ts
+        ├── stacks/application-stack.ts
+        └── stages/application-stage.ts
+```
+
+---
+
+## Prerequisites
+
+- Node.js 20+, pnpm
+- Python 3.14+, [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- AWS CLI configured with credentials that have Bedrock access
+- Docker (for building the agent container image)
+
+---
+
+## Running Locally
+
+Start both processes in separate terminals:
+
+**Terminal 1 — Agent backend**
+```bash
+# Set AWS credentials so the agent can call Bedrock
+export AWS_PROFILE=your-profile   # or AWS_ACCESS_KEY_ID / SECRET / SESSION_TOKEN
+export AWS_REGION=us-east-1
+
+npx nx run ar4_sim.ar4_robot_agent:agent-serve-local
+# Starts FastAPI on http://localhost:8081
+```
+
+**Terminal 2 — Frontend**
+```bash
+npx nx run @ar4-sim/sim-for-ar4:serve-local
+# Opens http://localhost:4200
+```
+
+In `serve-local` mode Cognito auth is bypassed and the frontend points directly to `http://localhost:8081`.
+
+---
+
+## Deploying to AWS
 
 ```bash
-cd dummy-sim
-pip install numpy matplotlib
-python visualize.py
+# First time only — bootstrap CDK in your account/region
+npx nx run @ar4-sim/infra:bootstrap
+
+# Build everything and deploy
+npx nx run @ar4-sim/infra:deploy
 ```
 
-### 实机控制
+The CloudFront URL is printed as `DistributionDomainName` in the stack outputs.
+
+To load the deployed runtime config for local development against the real backend:
+```bash
+npx nx run @ar4-sim/sim-for-ar4:load:runtime-config
+```
+
+---
+
+## How It Works
+
+1. You type a natural language instruction (e.g. *"wave at me"*) in the chat panel.
+2. The frontend POSTs it to the Strands agent via a SigV4-signed streaming request.
+3. The agent calls its ROS2 tools (`execute_pose`, `move_joint`, etc.) and emits a ` ```ros2 ``` ` fenced JSON block in its response.
+4. The frontend parses the block, updates `targetAngles` state, and the `useFrame` loop smoothly lerps the Three.js joint groups toward the new angles.
+
+### AR4 Joints
+
+| Joint | Axis | Range |
+|-------|------|-------|
+| Base | Y (turntable) | ±180° |
+| Shoulder | X | −90° to 90° |
+| Elbow | X | −135° to 135° |
+| Wrist Pitch | X | −90° to 90° |
+| Wrist Roll | Z | ±180° |
+| Gripper | ±X spread | 0% (closed) – 100% (open) |
+
+### Named Poses
+
+`home` · `ready` · `pick_up` · `place_down` · `wave` · `inspect` · `rest`
+
+---
+
+## Common Tasks
 
 ```bash
-cd dummy-demo
-pip install pyserial numpy opencv-python
+# Build all packages
+pnpm build
 
-# 硬件连通性测试
-python main.py --test
+# Lint and auto-fix
+pnpm lint
 
-# 交互控制
-python main.py
+# Run tests
+pnpm nx run-many --target test --all
+
+# Sync TypeScript project references
+pnpm nx sync
 ```
 
-> ⚠️ USB Type-C 有正反面 — **翻面**才连接 STM32 CDC。
+---
 
-## 功能
+## Next Steps
 
-- **运动学引擎** — 标准 DH 正/逆运动学，经过固件源码验证
-- **串口控制** — 关节空间 & 笛卡尔空间运动，夹爪开合
-- **RGBD 视觉** — Orbbec 深度相机，颜色检测 + 定位
-- **LLM 规划** — AWS Bedrock Claude 自然语言→抓取任务 (WIP)
+### Real Simulator Integration
 
-## 安全注意事项
+The current 3D viewer is a lightweight browser renderer built with Three.js. For higher-fidelity simulation with physics, collision detection, and sensor data, the agent can be connected to a proper robotics simulator:
 
-- 开机顺序: 上电 → `!HOME` → `!START`
-- **关机顺序: `!RESET` (折叠) → `!DISABLE` → 断电**
-- 不要在展开状态断电，臂会自由坠落
+#### Option A — Gazebo via rosbridge
 
-## 致谢
+[Gazebo](https://gazebosim.org/) is the standard ROS2 simulator. The frontend can communicate with it over WebSocket using [`rosbridge_suite`](https://github.com/RobotWebTools/rosbridge_suite) and [`roslibjs`](https://github.com/RobotWebTools/roslibjs):
 
-- [稚晖君](https://github.com/peng-zhihui) — 原始设计
-- 木子晓汶 — PCB 二次开发
-- 任同学 — V2 版本整理
+1. Run a ROS2 + Gazebo environment with the AR4 URDF loaded
+2. Start `rosbridge_websocket` on port 9090
+3. Replace the Three.js joint updates in `useSimulator.ts` with `ros.publish()` calls to `/ar4/joint_trajectory_controller/command`
+4. Subscribe to `/ar4/joint_states` to read back actual positions for the joint panel
+
+```ts
+// Example roslibjs integration
+import ROSLIB from 'roslib';
+const ros = new ROSLIB.Ros({ url: 'ws://localhost:9090' });
+const cmdTopic = new ROSLIB.Topic({ ros, name: '/ar4/joint_trajectory_controller/command', messageType: 'trajectory_msgs/JointTrajectory' });
+cmdTopic.publish(new ROSLIB.Message({ joint_names: ['base', ...], points: [{ positions: [...], time_from_start: { secs: 1 } }] }));
+```
+
+#### Option B — NVIDIA Isaac Sim
+
+[Isaac Sim](https://developer.nvidia.com/isaac/sim) provides GPU-accelerated physics and photorealistic rendering. It exposes a ROS2 bridge, so the same rosbridge approach above applies. Useful for training perception models alongside the control agent.
+
+#### Option C — MuJoCo / PyBullet (lightweight)
+
+For a Python-native physics simulation without a full ROS2 stack, [MuJoCo](https://mujoco.org/) or [PyBullet](https://pybullet.org/) can be embedded directly in the agent backend. The agent tools would drive the simulator instead of returning JSON, and stream back rendered frames or joint feedback.
+
+---
+
+## Acknowledgements
+
+- [Annin Robotics](https://www.anninrobotics.com/) — AR4 robot arm design
+- [稚晖君](https://github.com/peng-zhihui) — original Dummy Robot inspiration
+- [AWS Nx Plugin](https://awslabs.github.io/nx-plugin-for-aws/) — project scaffolding
+- [Strands Agents](https://github.com/strands-agents/sdk-python) — agent framework
 
 ## License
 
 MIT
-# my-project
-
-✨ Your new, shiny [Nx workspace](https://nx.dev) has been successfully created! ✨.
-
-[Learn more about this workspace setup and the @aws/nx-plugin](https://awslabs.github.io/nx-plugin-for-aws). Now, let's get you up to speed!
-
-## Install Nx Console
-
-Nx Console is an editor extension that enriches your developer experience. It lets you run tasks, generate code, and improves code autocompletion in your IDE. It is available for VSCode and IntelliJ.
-
-[Install Nx Console &raquo;](https://nx.dev/getting-started/editor-setup?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-
-## Available generators
-
-The following list of generators are what is currently available in the `@aws/nx-plugin`:
-
-- **connection**: Integrates a source project with a target project
-
-- **license**: Add LICENSE files and configure source code licence headers
-
-- **py#fast-api**: Generates a FastAPI Python project
-
-- **py#lambda-function**: Adds a lambda function to a python project
-
-- **py#mcp-server**: Generate a Python Model Context Protocol (MCP) server for providing context to Large Language Models
-
-- **py#project**: Generates a Python project
-
-- **py#strands-agent**: Add a Strands Agent to a Python project
-
-- **terraform#project**: Generates a Terraform project
-
-- **ts#astro-docs**: Generates an Astro + Starlight documentation site with localisation, snippets, blog, and optional automated documentation translation
-
-- **ts#infra**: Generates a cdk application
-
-- **ts#lambda-function**: Generate a TypeScript lambda function
-
-- **ts#mcp-server**: Generate a TypeScript Model Context Protocol (MCP) server for providing context to Large Language Models
-
-- **ts#nx-generator**: Generator for adding an Nx Generator to an existing TypeScript project
-
-- **ts#nx-plugin**: Generate an Nx Plugin of your own! Build custom generators automatically made available for AI vibe-coding via MCP
-
-- **ts#project**: Generates a TypeScript project
-
-- **ts#react-website**: Generates a React static website
-
-- **ts#react-website#auth**: Adds auth to an existing React website
-
-- **ts#smithy-api**: Create an API using Smithy and the Smithy TypeScript Server SDK
-
-- **ts#strands-agent**: Add a Strands Agent to a TypeScript project
-
-- **ts#trpc-api**: creates a trpc backend
-
-- **ts#rdb**: Create a relational database project
-
-You also have the option of using additional [commmunity plugins](https://nx.dev/plugin-registry) as needed.
-
-## Invoking a generator
-
-```sh
-pnpm nx g @aws/nx-plugin:<generator-name>
-```
-
-Alternatively you can use the Nx IDE plugin to invoke your generators.
-
-Refer to the [full documentation](https://awslabs.github.io/nx-plugin-for-aws) for additional guidance for each generator.
-
-## Common tasks
-
-### Build a single project
-
-```sh
-pnpm nx build <project-name>
-```
-
-### Build all projects
-
-```sh
-pnpm nx run-many --target build --all
-# or
-pnpm build
-```
-
-### Run arbitrary task
-
-```sh
-pnpm nx <target> <project-name>
-```
-
-### Lint (and fix) all projects
-
-```sh
-pnpm nx run-many --target lint --configuration=fix --all
-# or
-pnpm lint
-```
-
-## Test all projects (and update snapshots)
-
-```sh
-pnpm nx run-many --target test --all --update
-```
-
-These targets are either [inferred automatically](https://nx.dev/concepts/inferred-tasks?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) or defined in the `project.json` or `package.json` files.
-
-[More about running tasks in the Nx docs &raquo;](https://nx.dev/features/run-tasks?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-
-## Keep TypeScript project references up to date
-
-Nx automatically updates TypeScript [project references](https://www.typescriptlang.org/docs/handbook/project-references.html) in `tsconfig.json` files to ensure they remain accurate based on your project dependencies (`import` statements). This sync is automatically done when running tasks such as `build`, which require updated references to function correctly.
-
-To manually trigger the process to sync the project graph dependencies information to the TypeScript project references, run the following command:
-
-```sh
-pnpm nx sync
-```
-
-You can enforce that the TypeScript project references are always in the correct state when running in CI by adding a step to your CI job configuration that runs the following command:
-
-```sh
-pnpm nx sync:check
-```
-
-[Learn more about nx sync](https://nx.dev/reference/nx-commands#sync)
-
-## Set up CI!
-
-Use the following command to configure a CI workflow for your workspace:
-
-```sh
-pnpm nx g ci-workflow
-```
-
-[Learn more about Nx on CI](https://nx.dev/ci/intro/ci-with-nx#ready-get-started-with-your-provider?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-
-## Useful links
-
-Learn more:
-
-- [@aws/nx-plugin quick-start](https://awslabs.github.io/nx-plugin-for-aws/en/get_started/quick-start/)
-- [@aws/nx-plugin AI dungeon game](https://awslabs.github.io/nx-plugin-for-aws/en/get_started/tutorials/dungeon-game/overview/)
-- [What are Nx plugins?](https://nx.dev/concepts/nx-plugins?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-- [Learn about Nx on CI](https://nx.dev/ci/intro/ci-with-nx?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
