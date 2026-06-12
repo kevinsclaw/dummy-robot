@@ -108,6 +108,8 @@
         button:active { transform: scale(0.95); }
         .btn-send { background: #4fc3f7; color: #000; }
         .btn-home { background: #66bb6a; color: #000; }
+        .btn-rehome { background: #4fc3f7; color: #000; }
+        .btn-reset { background: #ffa726; color: #000; }
         .btn-estop { background: #f44336; color: #fff; font-size: 1.2em; }
         
         .controls {
@@ -145,6 +147,20 @@
             cursor: pointer;
         }
         .quick-cmd:hover { background: #283593; color: #fff; }
+
+        .safety-panel {
+            background: #1b2838;
+            border: 1px solid #37474f;
+            border-radius: 8px;
+            padding: 14px 18px;
+            margin-bottom: 12px;
+            font-size: 0.85em;
+            line-height: 1.6;
+        }
+        .safety-panel h3 { color: #ffa726; margin-bottom: 8px; font-size: 1em; }
+        .safety-panel .warn { color: #ef5350; font-weight: bold; }
+        .safety-panel .step { color: #81c784; }
+        .safety-panel .note { color: #90a4ae; font-style: italic; }
     </style>
 </head>
 <body>
@@ -160,6 +176,14 @@
             Z: <span id="pos-z">--</span> mm
         </div>
         
+        <div class="safety-panel">
+            <h3>⚠️ 安全操作指南</h3>
+            <p><span class="step">开机顺序：</span> 接电源 → 插 USB-C（翻面=STM32）→ 点「🏠 开机」(HOME + ENABLE)</p>
+            <p><span class="step">关机顺序：</span> 点「📦 关机」(RESET折叠 + DISABLE) → 等 5秒到位 → 拔电源 → 拔 USB</p>
+            <p class="warn">❌ 绝对不要在展开状态直接断电 — 机械臂会坠落！</p>
+            <p class="note">USB Type-C 有正反面: 一面=STM32 CDC (✅), 翻面=ESP32 CP2102 (❌)</p>
+        </div>
+
         <div class="quick-cmds">
             <div class="quick-cmd" onclick="sendQuick('移动到 x=200 y=0 z=250')">移动到正前方</div>
             <div class="quick-cmd" onclick="sendQuick('张开夹爪')">张开夹爪</div>
@@ -177,7 +201,9 @@
         </div>
         
         <div class="controls">
-            <button class="btn-home" onclick="sendHome()">🏠 回零</button>
+            <button class="btn-home" onclick="sendHome()">🏠 开机 (HOME + ENABLE)</button>
+            <button class="btn-rehome" onclick="sendRehome()">🔄 复位 (HOME)</button>
+            <button class="btn-reset" onclick="sendReset()">📦 关机 (RESET + DISABLE)</button>
             <button class="btn-estop" onclick="sendEstop()">⛔ 急停</button>
         </div>
     </div>
@@ -266,8 +292,19 @@
         }
         
         function sendHome() {
-            addMsg('🏠 回零位...', 'user');
+            addMsg('🏠 开机: HOME + ENABLE...', 'user');
             ws.send(JSON.stringify({type: 'home'}));
+        }
+        
+        function sendRehome() {
+            addMsg('🔄 复位: HOME...', 'user');
+            ws.send(JSON.stringify({type: 'rehome'}));
+        }
+        
+        function sendReset() {
+            if (!confirm('ℹ️ 关机流程：\n1. RESET (折叠收纳)\n2. DISABLE (失能电机)\n\n确认关机？')) return;
+            addMsg('📦 关机: RESET + DISABLE...', 'user');
+            ws.send(JSON.stringify({type: 'reset'}));
         }
         
         function sendEstop() {
