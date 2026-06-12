@@ -81,11 +81,20 @@ class DummySerial:
             self._ser = serial.Serial(port, self.baudrate, timeout=2)
             time.sleep(0.3)
             self._ser.read(self._ser.in_waiting)  # 清缓冲
-            logger.info(f"已连接: {port}")
+            # 设置默认速度 (较慢, 安全)
+            self._send("#SETSPEED 20")
+            logger.info(f"已连接: {port} (speed=20)")
             return True
         except Exception as e:
             logger.error(f"连接失败: {e}")
             return False
+
+    def set_speed(self, speed: int) -> bool:
+        """设置运动速度 (1-100)"""
+        speed = max(1, min(100, speed))
+        self._send(f"#SETSPEED {speed}")
+        logger.info(f"速度设置: {speed}")
+        return True
 
     def disconnect(self):
         """断开连接"""
@@ -181,26 +190,28 @@ class DummySerial:
     def get_joint_positions(self) -> List[float]:
         """读取当前 6 轴关节角度"""
         resp = self._send("#GETJPOS")
-        # 响应格式: "ok 0.00 -0.00 90.00 0.00 0.00 0.00"
-        try:
-            parts = resp.split()
-            if parts[0] == "ok" and len(parts) >= 7:
-                self._joints = [float(x) for x in parts[1:7]]
-                return self._joints.copy()
-        except (ValueError, IndexError):
-            pass
+        # 响应可能多行，找含有数值的 "ok x x x x x x" 行
+        for line in resp.strip().split('\n'):
+            try:
+                parts = line.strip().split()
+                if parts[0] == "ok" and len(parts) >= 7:
+                    self._joints = [float(x) for x in parts[1:7]]
+                    return self._joints.copy()
+            except (ValueError, IndexError):
+                continue
         logger.warning(f"GETJPOS 解析失败: {resp}")
         return self._joints.copy()
 
     def get_cartesian_pose(self) -> List[float]:
         """读取末端位姿 [X, Y, Z, A, B, C]"""
         resp = self._send("#GETLPOS")
-        try:
-            parts = resp.split()
-            if parts[0] == "ok" and len(parts) >= 7:
-                return [float(x) for x in parts[1:7]]
-        except (ValueError, IndexError):
-            pass
+        for line in resp.strip().split('\n'):
+            try:
+                parts = line.strip().split()
+                if parts[0] == "ok" and len(parts) >= 7:
+                    return [float(x) for x in parts[1:7]]
+            except (ValueError, IndexError):
+                continue
         logger.warning(f"GETLPOS 解析失败: {resp}")
         return HOME_POSE.copy()
 
@@ -226,13 +237,14 @@ class DummySerial:
                 return False
 
         cmd = "&" + ",".join(f"{a:.2f}" for a in joints)
+        old_joints = self._joints.copy()
         resp = self._send(cmd)
         self._joints = joints.copy()
 
         if wait:
             # 简单等待 — 根据角度差估算时间
-            max_delta = max(abs(a - b) for a, b in zip(joints, self._joints))
-            wait_time = max(0.5, max_delta / 30.0)  # ~30°/s
+            max_delta = max(abs(a - b) for a, b in zip(joints, old_joints))
+            wait_time = max(1.0, max_delta / 30.0)  # ~30°/s
             time.sleep(min(wait_time, 5.0))
 
         return True
@@ -304,6 +316,7 @@ class DummySerial:
         current = self.get_joint_positions()
         current[5] = j6_angle  # J6 是 index 5
         self._gripper_angle = j6_angle
+        time.sleep(0.3)  # 等前一个运动完成
         return self.move_joints(current)
 
     # ─── 状态 ────────────────────────────────────────────────
