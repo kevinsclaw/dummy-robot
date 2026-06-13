@@ -119,19 +119,11 @@ def detect_red_marker(frame, detector=None):
     """
     import cv2 as _cv2
     import numpy as _np
-    # 优先用 ColorBlockDetector
-    if detector is not None:
-        try:
-            blocks = detector.detect_specific(frame, MARKER_COLOR)
-            if blocks:
-                biggest = max(blocks, key=lambda b: getattr(b, 'area_px', getattr(b, 'area', 0)))
-                return (float(biggest.cx), float(biggest.cy))
-        except Exception:
-            pass
-    # 后备: 直接 HSV 阈值
+    # ⚠️ 不用 ColorBlockDetector: 它 min_area=500 会滤掉小黄夹子(≎270px²)。
+    #    直接用调好的 HSV 阈值 (H下限=23, 滤掉噪点)。
     hsv = _cv2.cvtColor(_cv2.GaussianBlur(frame, (5, 5), 0), _cv2.COLOR_BGR2HSV)
     if MARKER_COLOR == "yellow":
-        mask = _cv2.inRange(hsv, _np.array([18, 80, 80]), _np.array([38, 255, 255]))
+        mask = _cv2.inRange(hsv, _np.array([23, 80, 80]), _np.array([38, 255, 255]))
     else:  # red
         mask = _cv2.inRange(hsv, _np.array([0, 100, 80]), _np.array([10, 255, 255]))
         mask |= _cv2.inRange(hsv, _np.array([170, 100, 80]), _np.array([180, 255, 255]))
@@ -140,7 +132,7 @@ def detect_red_marker(frame, detector=None):
     if not contours:
         return None
     biggest = max(contours, key=_cv2.contourArea)
-    if _cv2.contourArea(biggest) < 30:
+    if _cv2.contourArea(biggest) < 150:  # 夹子≎270px², 滤掉 <150 的噪点
         return None
     M = _cv2.moments(biggest)
     if M['m00'] == 0:

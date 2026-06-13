@@ -55,7 +55,7 @@ import cv2 as _cv2
 import numpy as _np
 
 # 黄色标记 (小黄鱼) 默认 HSV 阈值, 可被前端滑块实时调整
-HSV_THRESH = {"h_lo": 18, "s_lo": 80, "v_lo": 80, "h_hi": 38, "s_hi": 255, "v_hi": 255}
+HSV_THRESH = {"h_lo": 23, "s_lo": 80, "v_lo": 80, "h_hi": 38, "s_hi": 255, "v_hi": 255}
 
 
 def generate_mask_mjpeg():
