@@ -33,7 +33,8 @@ class DummyCAN:
         初始化 Dummy CAN 驱动
 
         参数:
-            port: USB 串口路径 (如 /dev/ttyACM0)，None 为自动搜索
+            port: USB 串口路径 (如 /dev/dummy_arm)，None 为自动搜索
+                  推荐使用 udev symlink 而非 /dev/ttyACM* (编号不固定)
         """
         self.port = port
         self.connected = False

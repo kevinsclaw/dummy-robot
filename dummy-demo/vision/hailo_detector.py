@@ -105,11 +105,7 @@ class HailoDetector:
                 InputVStreamParams, OutputVStreamParams
             )
             
-            self._HEF = HEF
-            self._VDevice = VDevice
-            self._ConfigureParams = ConfigureParams
             self._FormatType = FormatType
-            self._HailoStreamInterface = HailoStreamInterface
             self._InferVStreams = InferVStreams
             self._InputVStreamParams = InputVStreamParams
             self._OutputVStreamParams = OutputVStreamParams
@@ -134,6 +130,17 @@ class HailoDetector:
             )
             self._network_group = self._vdevice.configure(self._hef, cfg)[0]
             
+            # 预激活 network group 并创建持久化 pipeline
+            ng = self._network_group
+            self._ng_params = ng.create_params()
+            self._activated = ng.activate(self._ng_params)
+            self._activated.__enter__()
+            
+            inp_params = InputVStreamParams.make(ng, format_type=FormatType.UINT8)
+            out_params = OutputVStreamParams.make(ng, format_type=FormatType.FLOAT32)
+            self._pipeline = InferVStreams(ng, inp_params, out_params)
+            self._pipeline.__enter__()
+            
             self._started = True
             logger.info("Hailo detector started ✅")
             return True
@@ -145,6 +152,16 @@ class HailoDetector:
     
     def stop(self):
         """释放 Hailo 资源"""
+        if hasattr(self, '_pipeline') and self._pipeline:
+            try:
+                self._pipeline.__exit__(None, None, None)
+            except:
+                pass
+        if hasattr(self, '_activated') and self._activated:
+            try:
+                self._activated.__exit__(None, None, None)
+            except:
+                pass
         if self._vdevice:
             del self._vdevice
             self._vdevice = None
@@ -218,87 +235,82 @@ class HailoDetector:
         
         return rgb
     
-    def _infer(self, input_tensor: np.ndarray) -> Optional[np.ndarray]:
-        """执行 Hailo 推理"""
+    def _infer(self, input_tensor: np.ndarray) -> Optional[list]:
+        """执行 Hailo 推理 (使用持久化 pipeline)"""
         try:
-            ng = self._network_group
-            ng_params = ng.create_params()
-            
-            with ng.activate(ng_params):
-                inp_params = self._InputVStreamParams.make(
-                    ng, format_type=self._FormatType.UINT8
-                )
-                out_params = self._OutputVStreamParams.make(
-                    ng, format_type=self._FormatType.FLOAT32
-                )
-                
-                with self._InferVStreams(ng, inp_params, out_params) as pipeline:
-                    # Add batch dimension
-                    batch = input_tensor[np.newaxis, ...]  # (1, H, W, 3)
-                    result = pipeline.infer({self._input_info[0].name: batch})
-                    return result[self._output_info[0].name]
-                    
+            batch = input_tensor[np.newaxis, ...]  # (1, H, W, 3)
+            result = self._pipeline.infer({self._input_info[0].name: batch})
+            raw = result[self._output_info[0].name]
+            # HailoRT NMS 输出: list[batch][class] = ndarray(N, 5)
+            # 取第一个 batch
+            if isinstance(raw, list) and len(raw) > 0:
+                if isinstance(raw[0], list):
+                    return raw[0]  # list of 80 ndarrays
+                return raw
+            return raw
         except Exception as e:
             logger.error(f"Inference failed: {e}")
             return None
     
-    def _postprocess(self, raw_output: np.ndarray, orig_shape: tuple) -> List[Detection]:
+    def _postprocess(self, raw_output, orig_shape: tuple) -> List[Detection]:
         """
-        后处理 NMS 输出。
+        后处理 HailoRT NMS 输出。
         
-        YOLOv6n with NMS output shape: (1, num_classes, 5, max_detections)
-        5 = [x1, y1, x2, y2, score] (normalized to input_size)
+        raw_output: list of 80 ndarrays, 每个 shape (N, 5)
+            5 = [y1, x1, y2, x2, score] (归一化 0-1 相对于模型输入尺寸)
         """
         scale, pad_w, pad_h, orig_w, orig_h = self._pad_info
+        input_size = self.input_size
         detections = []
         
-        # Output shape: (batch, num_classes, 5, max_det) or similar
-        # Flatten and parse based on actual model output format
-        out = raw_output.squeeze(0)  # Remove batch dim
+        if not isinstance(raw_output, list):
+            return []
         
-        if out.ndim == 3:
-            # Shape: (num_classes, 5, max_det)
-            num_classes = out.shape[0]
-            for cls_id in range(num_classes):
-                cls_data = out[cls_id]  # (5, max_det)
-                for det_idx in range(cls_data.shape[1]):
-                    score = cls_data[4, det_idx]
-                    if score < self.conf_threshold:
-                        continue
-                    
-                    # Coordinates in model input space
-                    x1 = cls_data[0, det_idx]
-                    y1 = cls_data[1, det_idx]
-                    x2 = cls_data[2, det_idx]
-                    y2 = cls_data[3, det_idx]
-                    
-                    # Remove padding and rescale to original image
-                    x1 = (x1 - pad_w) / scale
-                    y1 = (y1 - pad_h) / scale
-                    x2 = (x2 - pad_w) / scale
-                    y2 = (y2 - pad_h) / scale
-                    
-                    # Clamp
-                    x1 = max(0, min(orig_w, x1))
-                    y1 = max(0, min(orig_h, y1))
-                    x2 = max(0, min(orig_w, x2))
-                    y2 = max(0, min(orig_h, y2))
-                    
-                    cx = int((x1 + x2) / 2)
-                    cy = int((y1 + y2) / 2)
-                    area = int((x2 - x1) * (y2 - y1))
-                    
-                    if area < 100:  # 太小的忽略
-                        continue
-                    
-                    detections.append(Detection(
-                        label=self._get_class_name(cls_id),
-                        color="unknown",  # 后面用 HSV 填充
-                        confidence=float(score),
-                        cx=cx, cy=cy,
-                        bbox=[int(x1), int(y1), int(x2), int(y2)],
-                        area=area,
-                    ))
+        for cls_id, cls_dets in enumerate(raw_output):
+            if not hasattr(cls_dets, 'shape') or cls_dets.shape[0] == 0:
+                continue
+            
+            for det_row in cls_dets:
+                score = det_row[4]
+                if score < self.conf_threshold:
+                    continue
+                
+                # HailoRT NMS 输出: [y1, x1, y2, x2, score] 归一化到 0-1
+                y1_norm, x1_norm, y2_norm, x2_norm = det_row[:4]
+                
+                # 转换到模型输入空间 (pixel)
+                x1 = x1_norm * input_size
+                y1 = y1_norm * input_size
+                x2 = x2_norm * input_size
+                y2 = y2_norm * input_size
+                
+                # 去除 padding 并缩放到原图
+                x1 = (x1 - pad_w) / scale
+                y1 = (y1 - pad_h) / scale
+                x2 = (x2 - pad_w) / scale
+                y2 = (y2 - pad_h) / scale
+                
+                # Clamp
+                x1 = max(0, min(orig_w, x1))
+                y1 = max(0, min(orig_h, y1))
+                x2 = max(0, min(orig_w, x2))
+                y2 = max(0, min(orig_h, y2))
+                
+                cx = int((x1 + x2) / 2)
+                cy = int((y1 + y2) / 2)
+                area = int((x2 - x1) * (y2 - y1))
+                
+                if area < 100:  # 太小的忽略
+                    continue
+                
+                detections.append(Detection(
+                    label=self._get_class_name(cls_id),
+                    color="unknown",
+                    confidence=float(score),
+                    cx=cx, cy=cy,
+                    bbox=[int(x1), int(y1), int(x2), int(y2)],
+                    area=area,
+                ))
         
         return detections
     

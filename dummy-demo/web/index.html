@@ -175,6 +175,12 @@
             Y: <span id="pos-y">--</span> mm &nbsp;
             Z: <span id="pos-z">--</span> mm
         </div>
+
+        <!-- 实时相机画面 -->
+        <div style="text-align:center; margin: 10px 0;">
+            <img id="camera-feed" src="/video_feed" style="width:100%; max-width:640px; border-radius:8px; border:1px solid #333;" 
+                 onerror="this.style.display='none'" />
+        </div>
         
         <div class="safety-panel">
             <h3>⚠️ 安全操作指南</h3>

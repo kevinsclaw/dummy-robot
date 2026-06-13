@@ -89,7 +89,13 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None):
             frame = camera.read_color()
         elif hasattr(camera, 'read'):
             ret = camera.read()
-            frame = ret[0] if isinstance(ret, tuple) else ret
+            # cv2.VideoCapture.read() returns (bool, frame)
+            if isinstance(ret, tuple):
+                success, frame = ret
+                if not success:
+                    frame = None
+            else:
+                frame = ret
         else:
             return json.dumps({"error": "相机接口不兼容"})
         
@@ -300,9 +306,28 @@ def run_demo(port: Optional[str] = None, mock: bool = False,
         robot.enable()
         print("✅ 机械臂已连接并使能")
     
-    # TODO: 相机和检测器在有硬件时初始化
-    camera = None
+    # 初始化相机 (RGB, /dev/video0 on Pi5)
+    import cv2
+    camera = cv2.VideoCapture(0)
+    if camera.isOpened():
+        camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        print("📷 相机已连接 (640x480 RGB)")
+    else:
+        print("⚠️  相机未检测到，视觉功能不可用")
+        camera = None
+
+    # 颜色方块检测器
     detector = None
+    if camera:
+        try:
+            from vision.color_detector import ColorBlockDetector
+            detector = ColorBlockDetector()
+            print("🎨 颜色检测器已加载")
+        except ImportError:
+            print("⚠️  颜色检测器不可用")
+
+    # 手眼标定 (TODO: 标定完成后加载参数)
     calibration = None
     
     agent = create_dummy_agent(robot, camera, detector, calibration,

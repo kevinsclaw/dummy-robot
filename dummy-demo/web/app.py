@@ -7,7 +7,7 @@ FastAPI + WebSocket 实时显示 Agent 思考过程和 tool calls。
 
 启动:
     cd /home/pi/dummy-demo
-    AWS_DEFAULT_REGION=us-east-1 python3 web/app.py --port /dev/ttyACM0
+    AWS_DEFAULT_REGION=us-east-1 python3 web/app.py --port /dev/dummy_arm
 
 浏览器打开: http://<pi5-ip>:8080
 """
@@ -37,6 +37,8 @@ app = FastAPI(title="Dummy V2 Controller")
 robot = None
 agent_model = None
 agent_tools = None
+camera_instance = None  # 全局相机引用，用于视频流
+hailo_detector = None   # 全局 Hailo 检测器，用于实时叠加
 
 
 def get_index_html():
@@ -46,6 +48,66 @@ def get_index_html():
 @app.get("/")
 async def index():
     return HTMLResponse(get_index_html())
+
+
+from fastapi.responses import StreamingResponse
+import cv2 as _cv2
+
+def generate_mjpeg():
+    """Generator 产生 MJPEG 帧，叠加 Hailo 检测结果"""
+    import threading
+    lock = threading.Lock()
+    while True:
+        if camera_instance is None or not camera_instance.isOpened():
+            time.sleep(0.1)
+            continue
+        with lock:
+            ret, frame = camera_instance.read()
+        if not ret:
+            time.sleep(0.03)
+            continue
+
+        # 叠加 Hailo 检测结果
+        if hailo_detector and hailo_detector._started:
+            try:
+                detections = hailo_detector.detect(frame)
+                for det in detections:
+                    x1, y1, x2, y2 = det.bbox
+                    # 画框
+                    color_map = {
+                        "red": (0, 0, 255), "blue": (255, 0, 0),
+                        "green": (0, 255, 0), "yellow": (0, 255, 255),
+                        "orange": (0, 165, 255), "purple": (255, 0, 255),
+                    }
+                    box_color = color_map.get(det.color, (255, 255, 255))
+                    _cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+                    # 标签
+                    label = f"{det.label} {det.color} {det.confidence:.0%}"
+                    _cv2.putText(frame, label, (x1, y1 - 8),
+                                _cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 1)
+                # 调试: 在左上角显示检测数量
+                _cv2.putText(frame, f"YOLO: {len(detections)} obj", (10, 25),
+                            _cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            except Exception as e:
+                _cv2.putText(frame, f"YOLO ERR: {str(e)[:40]}", (10, 25),
+                            _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+
+        _, jpeg = _cv2.imencode('.jpg', frame, [_cv2.IMWRITE_JPEG_QUALITY, 70])
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+        time.sleep(0.033)  # ~30fps
+
+
+@app.get("/video_feed")
+async def video_feed():
+    """实时 MJPEG 视频流"""
+    if camera_instance is None:
+        return HTMLResponse("<h3>相机未连接</h3>", status_code=503)
+    return StreamingResponse(
+        generate_mjpeg(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"}
+    )
 
 
 @app.get("/status")
@@ -192,7 +254,10 @@ def main():
     global robot, agent_model, agent_tools
     
     parser = argparse.ArgumentParser(description="Dummy V2 Web Controller")
-    parser.add_argument("--port", type=str, default="/dev/ttyACM0", help="串口")
+    # 使用 udev symlink 固定设备名，避免 ttyACM 编号随枚举顺序变化
+    # udev 规则: /etc/udev/rules.d/99-dummy-arm.rules
+    # SUBSYSTEM=="tty", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="0d32", SYMLINK+="dummy_arm"
+    parser.add_argument("--port", type=str, default="/dev/dummy_arm", help="串口 (默认使用 udev symlink)")
     parser.add_argument("--mock", action="store_true", help="Mock 模式")
     parser.add_argument("--model", type=str, default="qwen.qwen3-vl-235b-a22b")
     parser.add_argument("--provider", type=str, default="bedrock")
@@ -231,8 +296,50 @@ def main():
             model_id=args.model,
         )
     
+    # Initialize camera (RGB, /dev/video0 on Pi5)
+    global camera_instance
+    import cv2
+    camera = cv2.VideoCapture(0)
+    if camera.isOpened():
+        camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        camera_instance = camera
+        print("📷 相机已连接 (640x480 RGB)")
+    else:
+        print("⚠️  相机未检测到，视觉功能不可用")
+        camera = None
+
+    # 颜色方块检测器
+    detector = None
+    if camera:
+        try:
+            from vision.color_detector import ColorBlockDetector
+            detector = ColorBlockDetector()
+            print("🎨 颜色检测器已加载")
+        except ImportError as e:
+            print(f"⚠️  颜色检测器不可用: {e}")
+
+    # Hailo-8 YOLO 检测器 (实时叠加到视频流)
+    global hailo_detector
+    try:
+        from vision.hailo_detector import HailoDetector
+        hailo_detector = HailoDetector(
+            model_path="/usr/share/hailo-models/yolov6n_h8.hef"
+        )
+        if hailo_detector.start():
+            print("🧠 Hailo-8 检测器已启动 (YOLO 实时叠加)")
+        else:
+            print("⚠️  Hailo-8 启动失败，视频流不叠加检测")
+            hailo_detector = None
+    except ImportError:
+        print("⚠️  Hailo SDK 未安装，视频流不叠加检测")
+        hailo_detector = None
+
+    # 手眼标定 (TODO: 标定完成后加载参数)
+    calibration = None
+
     # Initialize tools
-    agent_tools = create_agent_tools(robot)
+    agent_tools = create_agent_tools(robot, camera, detector, calibration)
     
     print(f"🧠 Model ready: {args.model}")
     print(f"🌐 Web UI: http://0.0.0.0:{args.web_port}")
