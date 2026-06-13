@@ -305,8 +305,8 @@ async def websocket_endpoint(ws: WebSocket):
                 
             elif msg.get("type") == "reset":
                 await ws.send_json({"type": "thinking", "text": "📦 关机流程: RESET (折叠) → DISABLE (失能)"})
-                # RESET = 折叠收纳 (J1=0, J2=-72, J3=180, J4=0, J5=0, J6=0)
-                await asyncio.to_thread(robot.move_joints, [0, -72, 180, 0, 0, 0])
+                # RESET = 折叠收纳 (J1=0, J2=-73, J3=180, J4=0, J5=0, J6=0) — 与固件 REST_POSE 一致
+                await asyncio.to_thread(robot.move_joints, [0, -73, 180, 0, 0, 0])
                 await asyncio.to_thread(time.sleep, 5)  # 等到位
                 await asyncio.to_thread(robot.disable)
                 await ws.send_json({"type": "response", "text": "✅ 关机完成！机械臂已折叠收纳并失能。\n现在可以安全断电。"})

@@ -23,12 +23,12 @@ from numpy import sin, cos, arctan2, sqrt, pi
 # ============================================================
 
 DH_PARAMS = np.array([
-    [0,    126.5,  35.0,  -90],   # Link 1: 底座旋转
+    [0,    109.0,  35.0,  -90],   # Link 1: 底座旋转 (L_BASE=109)
     [-90,  0,      146.0,  0],    # Link 2: 大臂
     [90,   52.0,   0,      90],   # Link 3: 肘部
-    [0,    117.0,  0,     -90],   # Link 4: 前臂
+    [0,    115.0,  0,     -90],   # Link 4: 前臂 (L_FOREARM=115)
     [0,    0,      0,      90],   # Link 5: 腕部偏转
-    [0,    75.5,   0,      0],    # Link 6: 腕部旋转
+    [0,    72.0,   0,      0],    # Link 6: 腕部旋转 (L_WRIST=72)
 ])
 
 # 关节限位（度）— 来自固件 DummyRobot 构造函数
@@ -41,13 +41,23 @@ JOINT_LIMITS = {
     6: (-100, 120),   # J5, 减速比 50, inverse
 }
 
-# 连杆参数（毫米）— 来自固件 DOF6Kinematic 构造函数
-L_BASE = 126.5    # 底座高度
+# 连杆参数（毫米）— 来自固件 dummy_robot.cpp:
+#   new DOF6Kinematic(0.109, 0.035, 0.146, 0.115, 0.052, 0.072)  // 单位米
+L_BASE = 109.0    # 底座高度
 D_BASE = 35.0     # 底座偏移
 L_ARM = 146.0     # 大臂长度
-L_FOREARM = 117.0 # 前臂长度
+L_FOREARM = 115.0 # 前臂长度
 D_ELBOW = 52.0    # 肘部偏移
-L_WRIST = 75.5    # 腕部到末端
+L_WRIST = 72.0    # 腕部到末端
+
+# 固件几何连杆向量（来自 6dof_kinematic.cpp 构造函数）
+# ⚠️ 关键: 固件 FK 用这些向量几何累加, 不是纯 DH 矩阵累乘。
+# D_ELBOW 沿连杆系 X 轴(-52), 不会被甲到世界 Y 轴。
+# 纯 DH 累乘会让 d3=52 被 alpha 旋转甲到 Y, 导致错误的 Y=52 偏移。
+L1_BASE = np.array([D_BASE, -L_BASE, 0.0])       # R0->1 作用
+L2_ARM = np.array([L_ARM, 0.0, 0.0])             # R0->2 作用
+L3_ELBOW = np.array([-D_ELBOW, 0.0, L_FOREARM])  # R0->3 作用
+L6_WRIST = np.array([0.0, 0.0, L_WRIST])         # R0->6 作用
 
 
 def deg2rad(deg):
@@ -89,6 +99,11 @@ def forward_kinematics(joint_angles_deg):
     """
     正运动学（FK）：关节角度 → 末端位姿 4x4 矩阵
 
+    ⚠️ 与固件 6dof_kinematic.cpp 的 SolveFK 一致:
+    - 旋转部分: DH 矩阵累乘 (Rz(θ)·Rx(α)), 与固件等价
+    - 位置部分: 用固件几何连杆向量累加 (非 DH 的 [a,0,d]),
+      避免纯 DH 累乘把肘部偏移 D_ELBOW 误甲到 Y 轴。
+
     参数:
         joint_angles_deg: 6个关节角度 (度)
 
@@ -96,17 +111,27 @@ def forward_kinematics(joint_angles_deg):
         4x4 齐次变换矩阵
     """
     q = np.array(joint_angles_deg, dtype=float)
-    T = np.eye(4)
 
+    # 累积旋转 R0->i (i=1..6), 与 DH 矩阵的旋转部分一致
+    R = np.eye(3)
+    R_list = []
     for i in range(6):
-        theta_offset = DH_PARAMS[i, 0]
-        d_i = DH_PARAMS[i, 1]
-        a_i = DH_PARAMS[i, 2]
-        alpha_i = DH_PARAMS[i, 3]
-        theta_i = theta_offset + q[i]
-        Hi = sdh_transform(theta_i, d_i, a_i, alpha_i)
-        T = T @ Hi
+        theta_i = deg2rad(DH_PARAMS[i, 0] + q[i])
+        alpha_i = deg2rad(DH_PARAMS[i, 3])
+        ct, st = cos(theta_i), sin(theta_i)
+        ca, sa = cos(alpha_i), sin(alpha_i)
+        Rz = np.array([[ct, -st, 0], [st, ct, 0], [0, 0, 1]])
+        Rx = np.array([[1, 0, 0], [0, ca, -sa], [0, sa, ca]])
+        R = R @ (Rz @ Rx)
+        R_list.append(R.copy())
 
+    # 固件几何位置累加: P = R01·L1 + R02·L2 + R03·L3 + R06·L6
+    P = (R_list[0] @ L1_BASE + R_list[1] @ L2_ARM +
+         R_list[2] @ L3_ELBOW + R_list[5] @ L6_WRIST)
+
+    T = np.eye(4)
+    T[:3, :3] = R_list[5]
+    T[:3, 3] = P
     return T
 
 

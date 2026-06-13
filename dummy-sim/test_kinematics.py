@@ -19,11 +19,12 @@ def test_fk_zero_position():
     print(f"[零位 FK] xyz=({result[0]:.2f}, {result[1]:.2f}, {result[2]:.2f})")
     print(f"          rpy=({result[3]:.2f}, {result[4]:.2f}, {result[5]:.2f})")
 
-    # Dummy 比 Picker 小很多，零位高度大约在 100~400mm 范围
+    # Dummy 比 Picker 小很多，零位高度大约在 100~500mm 范围
     assert 50 < result[2] < 500, f"零位 z 高度异常: {result[2]}"
-    # y 应接近 0（零位关节都朝前）
-    # y=52mm 是肘部偏移 D_ELBOW，正常
-    assert abs(result[1] - 52.0) < 1.0, f"零位 y 偏移异常: {result[1]} (应≈52)"
+    # y 应接近 0（零位关节都朝前，肘部偏移 D_ELBOW 沿腕部平面, 不甲到 Y）
+    # ⚠️ 以前错误地断言 y≈52（纯 DH 累乘把 D_ELBOW 误甲到 Y）；
+    #    修复成固件几何法后，真机零位 Y 应为 0。
+    assert abs(result[1]) < 1.0, f"零位 y 偏移异常: {result[1]} (应≈0)"
     print("  ✅ 通过\n")
 
 
@@ -92,7 +93,7 @@ def test_joint_limits():
 def test_workspace_boundary():
     """工作空间边界：可达点 IK 应有解"""
     # Dummy 是小型机械臂，工作空间比 Picker 小
-    # 总臂展大约: 35 + 146 + 117 + 75.5 ≈ 373.5mm
+    # 总臂展大约: 35 + 146 + 115 + 72 ≈ 368mm
     reachable_points = [
         [200, 0, 200, 0, 90, 0],
         [150, 100, 200, 0, 90, 0],
