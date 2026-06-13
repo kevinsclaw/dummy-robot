@@ -6,10 +6,10 @@ Eye-to-Hand (固定俯拍) 标定:
   像素坐标 (u, v) → 机械臂笛卡尔坐标 (x, y)
 
 方法: N 点仿射变换 (最小二乘), 网格点自动生成
-标记: 夹爪尖端贴一张红贴纸, 自动识别
+标记: 夹爪夹着一只小黄鱼(黄色), 自动识别
 
 用法:
-  # 全自动标定 (推荐, Pi5 headless): 红贴纸自动识别
+  # 全自动标定 (推荐, Pi5 headless): 小黄鱼(黄色)自动识别
   python calibrate.py --auto
 
   # 换环境重新标定: 只需改工作区参数
@@ -24,7 +24,7 @@ Eye-to-Hand (固定俯拍) 标定:
 参数说明:
   --center x,y    工作区中心 (机械臂 XY 坐标 mm), 默认 230,0
   --size 宽,深    工作区尺寸 mm, 默认 400,400
-  --calib-z z     标定高度 mm (红贴纸尖端高度), 默认 150
+  --calib-z z     标定高度 mm (小黄鱼标记高度), 默认 150
   --grid n        网格每边点数, 3=9点 4=16点, 默认 3
   --camera n      RGB 相机编号, 默认 0 (Pi5 /dev/video0)
 
@@ -64,7 +64,7 @@ CALIBRATION_FILE = Path(__file__).parent / "calibration.json"
 DEFAULT_CENTER = (230.0, 0.0)
 # 工作平面尺寸 (宽 x 深, mm) — 杨光当前约 400x400
 DEFAULT_SIZE = (400.0, 400.0)
-# 标定时机械臂尖端高度 (mm) — 红贴纸贴在尖端, 当前约 150mm (15cm)
+# 标定时机械臂尖端高度 (mm) — 小黄鱼夹在尖端, 当前约 150mm (15cm)
 DEFAULT_CALIB_Z = 150.0
 # 抓取高度 (积木顶面高度)
 DEFAULT_GRAB_Z = 150.0
@@ -74,7 +74,7 @@ DEFAULT_GRID = 3
 DEFAULT_POSE = (0.0, 90.0, 0.0)
 # 相机设备号 (Pi5 上 /dev/video0 => 0)
 RGB_DEVICE = 0
-# 标记颜色 (夹爪夹着的标定物 / 尖端贴纸)
+# 标记颜色 (夹爪夹着的小黄鱼标定物)
 MARKER_COLOR = "yellow"
 
 
@@ -362,11 +362,11 @@ class InteractiveCalibrator:
             logger.info(f"点击: ({x}, {y})")
 
 
-# ─── 自动标定 (红贴纸自动识别) ────────────────────────────────
+# ─── 自动标定 (小黄鱼/黄色自动识别) ────────────────────────────────
 
 class AutoCalibrator:
     """
-    全自动标定: 机械臂移动到每个网格点, 自动检测红贴纸像素位置。
+    全自动标定: 机械臂移动到每个网格点, 自动检测小黄鱼(黄色)像素位置。
     无需人工点击, 适合无显示器的 Pi5 (headless) 环境。
     """
 
@@ -560,7 +560,7 @@ def main():
     parser = argparse.ArgumentParser(description="Dummy V2 手眼标定")
     parser.add_argument('--verify', action='store_true', help='验证已有标定')
     parser.add_argument('--auto', action='store_true',
-                        help='全自动标定 (红贴纸识别, 无需点击, 适合 Pi5)')
+                        help='全自动标定 (小黄鱼/黄色识别, 无需点击, 适合 Pi5)')
     parser.add_argument('--points', type=str, help='自定义标定点 JSON 文件')
     parser.add_argument('--camera', type=int, default=RGB_DEVICE, help='RGB 相机编号')
     parser.add_argument('--grab-z', type=float, default=DEFAULT_GRAB_Z, help='抓取 Z 高度 (mm)')
@@ -569,7 +569,7 @@ def main():
     parser.add_argument('--size', type=str, default=None,
                         help='工作区尺寸 "宽,深" mm, 默认 400,400')
     parser.add_argument('--calib-z', type=float, default=DEFAULT_CALIB_Z,
-                        help='标定高度 mm (红贴纸尖端高度), 默认 150')
+                        help='标定高度 mm (小黄鱼标记高度), 默认 150')
     parser.add_argument('--grid', type=int, default=DEFAULT_GRID,
                         help='网格每边点数, 3=9点 4=16点, 默认 3')
     parser.add_argument('--samples', type=int, default=5,
@@ -610,7 +610,7 @@ def main():
         if args.verify:
             verify_calibration(robot, camera)
         elif args.auto:
-            # 全自动标定: 生成网格点 + 红贴纸识别
+            # 全自动标定: 生成网格点 + 小黄鱼(黄色)识别
             if args.points:
                 with open(args.points) as f:
                     points = [tuple(p) for p in json.load(f)]
