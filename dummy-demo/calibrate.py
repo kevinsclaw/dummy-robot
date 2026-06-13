@@ -1,20 +1,32 @@
 """
-手眼标定工具
-============
+手眼标定工具 (灵活版)
+========================
 
 Eye-to-Hand (固定俯拍) 标定:
   像素坐标 (u, v) → 机械臂笛卡尔坐标 (x, y)
 
-方法: 4 点仿射变换
-  1. 机械臂移动到 4 个预设标定点
-  2. 用户在相机画面中点击夹爪尖端
-  3. 计算仿射变换矩阵
-  4. 保存到 calibration.json
+方法: N 点仿射变换 (最小二乘), 网格点自动生成
+标记: 夹爪尖端贴一张红贴纸, 自动识别
 
-使用:
-  python calibrate.py              # 交互标定
-  python calibrate.py --verify     # 验证已有标定
-  python calibrate.py --auto       # 自动标定 (需标定板)
+用法:
+  # 全自动标定 (推荐, Pi5 headless): 红贴纸自动识别
+  python calibrate.py --auto
+
+  # 换环境重新标定: 只需改工作区参数
+  python calibrate.py --auto --center 230,0 --size 400,400 --calib-z 150 --grid 4
+
+  # 验证已有标定 (点击画面, 机械臂移到对应位置)
+  python calibrate.py --verify
+
+  # 交互标定 (需显示器, 手动点击夹爪尖端)
+  python calibrate.py
+
+参数说明:
+  --center x,y    工作区中心 (机械臂 XY 坐标 mm), 默认 230,0
+  --size 宽,深    工作区尺寸 mm, 默认 400,400
+  --calib-z z     标定高度 mm (红贴纸尖端高度), 默认 150
+  --grid n        网格每边点数, 3=9点 4=16点, 默认 3
+  --camera n      RGB 相机编号, 默认 0 (Pi5 /dev/video0)
 
 依赖:
   pip install numpy opencv-python pyserial
@@ -34,6 +46,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from driver.dummy_serial import DummySerial
 from vision.camera import Camera
+try:
+    from vision.color_detector import ColorBlockDetector
+except Exception:
+    ColorBlockDetector = None
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -43,24 +59,93 @@ logger = logging.getLogger(__name__)
 # 标定文件路径
 CALIBRATION_FILE = Path(__file__).parent / "calibration.json"
 
-# 标定用的 4 个机械臂位置 (笛卡尔坐标)
-# 在工作平面上均匀分布的 4 个点
-# 这些值需要根据实际工作空间调整
-DEFAULT_CALIBRATION_POINTS = [
-    # (x, y, z, a, b, c) — 笛卡尔坐标
-    # 以 HOME 位为参考: X=227.5, Y=0, Z=324.5
-    # 降低 Z 到积木平面 (大约 150mm 高)
-    (180.0, -80.0, 150.0, 0.0, 90.0, 0.0),   # 左前
-    (180.0,  80.0, 150.0, 0.0, 90.0, 0.0),   # 右前
-    (280.0,  80.0, 150.0, 0.0, 90.0, 0.0),   # 右后
-    (280.0, -80.0, 150.0, 0.0, 90.0, 0.0),   # 左后
-]
-
+# ─── 默认工作区配置 (可被命令行覆盖) ─────────────────────────
+# 工作平面中心 (机械臂 XY 坐标, mm)
+DEFAULT_CENTER = (230.0, 0.0)
+# 工作平面尺寸 (宽 x 深, mm) — 杨光当前约 400x400
+DEFAULT_SIZE = (400.0, 400.0)
+# 标定时机械臂尖端高度 (mm) — 红贴纸贴在尖端, 当前约 150mm (15cm)
+DEFAULT_CALIB_Z = 150.0
 # 抓取高度 (积木顶面高度)
 DEFAULT_GRAB_Z = 150.0
+# 网格密度 (每边点数, 3 => 9 点, 4 => 16 点)
+DEFAULT_GRID = 3
+# 姿态 (末端朝下)
+DEFAULT_POSE = (0.0, 90.0, 0.0)
+# 相机设备号 (Pi5 上 /dev/video0 => 0)
+RGB_DEVICE = 0
+# 标记颜色 (夹爪夹着的标定物 / 尖端贴纸)
+MARKER_COLOR = "yellow"
 
-# 相机设备号
-RGB_DEVICE = 1
+
+def generate_grid_points(center, size, z, grid=3, pose=DEFAULT_POSE):
+    """
+    在工作平面上自动生成网格标定点。
+
+    Args:
+        center: (cx, cy) 工作区中心 mm
+        size: (w, d) 工作区宽深 mm
+        z: 标定高度 mm
+        grid: 每边点数 (总点数 = grid*grid)
+        pose: (a, b, c) 末端姿态
+    Returns:
+        List[(x, y, z, a, b, c)]
+    """
+    cx, cy = center
+    w, d = size
+    a, b, c = pose
+    points = []
+    # 留 10% 边距, 避免到达工作区边缘极限
+    half_w = w / 2 * 0.9
+    half_d = d / 2 * 0.9
+    for i in range(grid):
+        for j in range(grid):
+            # 网格均匀分布
+            fx = -1 + 2 * i / (grid - 1) if grid > 1 else 0
+            fy = -1 + 2 * j / (grid - 1) if grid > 1 else 0
+            x = cx + fx * half_d   # X 是机械臂前后 (深)
+            y = cy + fy * half_w   # Y 是机械臂左右 (宽)
+            points.append((x, y, z, a, b, c))
+    # 按距中心远近排序: 从中心点开始, 逐渐向外, 移动更平滑安全
+    points.sort(key=lambda p: (p[0] - cx) ** 2 + (p[1] - cy) ** 2)
+    return points
+
+
+def detect_red_marker(frame, detector=None):
+    """
+    自动检测画面中的标记 (夹爪上的标定物)。
+    返回最大标记区域的中心像素 (u, v), 找不到返回 None。
+    根据 MARKER_COLOR 选择 HSV 范围。
+    """
+    import cv2 as _cv2
+    import numpy as _np
+    # 优先用 ColorBlockDetector
+    if detector is not None:
+        try:
+            blocks = detector.detect_specific(frame, MARKER_COLOR)
+            if blocks:
+                biggest = max(blocks, key=lambda b: getattr(b, 'area_px', getattr(b, 'area', 0)))
+                return (float(biggest.cx), float(biggest.cy))
+        except Exception:
+            pass
+    # 后备: 直接 HSV 阈值
+    hsv = _cv2.cvtColor(_cv2.GaussianBlur(frame, (5, 5), 0), _cv2.COLOR_BGR2HSV)
+    if MARKER_COLOR == "yellow":
+        mask = _cv2.inRange(hsv, _np.array([18, 80, 80]), _np.array([38, 255, 255]))
+    else:  # red
+        mask = _cv2.inRange(hsv, _np.array([0, 100, 80]), _np.array([10, 255, 255]))
+        mask |= _cv2.inRange(hsv, _np.array([170, 100, 80]), _np.array([180, 255, 255]))
+    mask = _cv2.morphologyEx(mask, _cv2.MORPH_OPEN, _np.ones((3, 3), _np.uint8))
+    contours, _ = _cv2.findContours(mask, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    biggest = max(contours, key=_cv2.contourArea)
+    if _cv2.contourArea(biggest) < 30:
+        return None
+    M = _cv2.moments(biggest)
+    if M['m00'] == 0:
+        return None
+    return (M['m10'] / M['m00'], M['m01'] / M['m00'])
 
 
 # ─── 标定数据结构 ─────────────────────────────────────────────
@@ -277,6 +362,135 @@ class InteractiveCalibrator:
             logger.info(f"点击: ({x}, {y})")
 
 
+# ─── 自动标定 (红贴纸自动识别) ────────────────────────────────
+
+class AutoCalibrator:
+    """
+    全自动标定: 机械臂移动到每个网格点, 自动检测红贴纸像素位置。
+    无需人工点击, 适合无显示器的 Pi5 (headless) 环境。
+    """
+
+    def __init__(self, robot, camera, points, detector=None,
+                 grab_z=DEFAULT_GRAB_Z, settle=1.5, samples=5,
+                 safe_z=280.0, confirm=False):
+        self.robot = robot
+        self.camera = camera
+        self.points = points
+        self.detector = detector
+        self.calibration = CalibrationData()
+        self.calibration.grab_z = grab_z
+        self.settle = settle      # 移动后稳定等待 (秒)
+        self.samples = samples    # 每点采样帧数 (取中值降噪)
+        self.safe_z = safe_z      # 安全过渡高度 (点间先抬到这个高度)
+        self.confirm = confirm    # 逐点确认模式
+
+    def _read_frame(self):
+        cam = self.camera
+        if hasattr(cam, 'read_color'):
+            return cam.read_color()
+        if hasattr(cam, 'read_rgb'):
+            return cam.read_rgb()
+        if hasattr(cam, 'read'):
+            ret = cam.read()
+            if isinstance(ret, tuple):
+                ok, f = ret
+                return f if ok else None
+            return ret
+        return None
+
+    def _detect_at_point(self):
+        """在当前位置多帧采样, 返回中值像素坐标"""
+        us, vs = [], []
+        for _ in range(self.samples):
+            frame = self._read_frame()
+            if frame is None:
+                time.sleep(0.1)
+                continue
+            pt = detect_red_marker(frame, self.detector)
+            if pt is not None:
+                us.append(pt[0])
+                vs.append(pt[1])
+            time.sleep(0.05)
+        if not us:
+            return None
+        return (float(np.median(us)), float(np.median(vs)))
+
+    def run(self):
+        print("\n" + "=" * 50)
+        print("  Dummy V2 全自动手眼标定 (逐点安全模式)")
+        print("=" * 50)
+        print(f"\n标定点: {len(self.points)} 个网格点 (从中心向外)")
+        print(f"标记颜色: {MARKER_COLOR} (夹爪上的标定物)")
+        print(f"安全过渡高度: Z={self.safe_z:.0f}mm")
+        print(f"逐点确认: {'是' if self.confirm else '否'}")
+        print(f"每点采样: {self.samples} 帧\n")
+        sys.stdout.flush()
+
+        failed = []
+        for i, point in enumerate(self.points):
+            x, y, z, a, b, c = point
+            print(f"--- 点 {i+1}/{len(self.points)}: X={x:.0f} Y={y:.0f} Z={z:.0f} ---")
+            sys.stdout.flush()
+
+            # 逐点确认 (在移动前, 更安全)
+            if self.confirm:
+                print(f"  [确认] 即将移动到 X={x:.0f} Y={y:.0f} Z={z:.0f}")
+                print(f"  输入 y/回车=继续, s=跳过, q=退出: ", end="", flush=True)
+                try:
+                    ans = input().strip().lower()
+                except EOFError:
+                    # 非交互环境 (如 SSH 后台): 不能逐点停, 直接中止
+                    print("\n  ⚠️ 检测到非交互终端, --confirm 需要在 Pi5 本地运行! 中止。")
+                    break
+                if ans == "q":
+                    print("  用户退出标定")
+                    break
+                if ans == "s":
+                    print("  跳过此点")
+                    failed.append(i + 1)
+                    continue
+
+            # 先抬到安全高度 (同 X,Y 但高 Z), 避免贴桌面横扫
+            self.robot.move_cartesian(x, y, self.safe_z, a, b, c)
+            time.sleep(self.settle)
+            # 再下降到标定高度
+            self.robot.move_cartesian(x, y, z, a, b, c)
+            time.sleep(self.settle)
+
+            pixel = self._detect_at_point()
+            if pixel is None:
+                print(f"  ⚠️ 未检测到 {MARKER_COLOR} 标记, 跳过")
+                sys.stdout.flush()
+                failed.append(i + 1)
+                continue
+            self.calibration.add_point(pixel, (x, y))
+            print(f"  ✓ 像素 ({pixel[0]:.0f}, {pixel[1]:.0f}) → 坐标 ({x:.0f}, {y:.0f})")
+            sys.stdout.flush()
+
+        # 标定结束, 抬回安全高度
+        try:
+            last = self.points[0]
+            self.robot.move_cartesian(last[0], last[1], self.safe_z, last[3], last[4], last[5])
+        except Exception:
+            pass
+
+        if len(self.calibration.pixel_points) < 3:
+            print(f"\n✗ 有效点不足 ({len(self.calibration.pixel_points)}), 标定失败")
+            print("  检查: 标记是否在相机视野内? 光照是否充足?")
+            return self.calibration
+
+        print("\n计算变换矩阵...")
+        if self.calibration.compute():
+            print(f"✓ 标定完成! 有效点 {len(self.calibration.pixel_points)}, "
+                  f"误差 {self.calibration.error_mm:.2f} mm")
+            if failed:
+                print(f"  跳过的点: {failed}")
+            self.calibration.save()
+        else:
+            print("✗ 标定失败")
+        return self.calibration
+
+
 # ─── 验证工具 ─────────────────────────────────────────────────
 
 def verify_calibration(robot: DummySerial, camera: Camera):
@@ -345,10 +559,36 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="Dummy V2 手眼标定")
     parser.add_argument('--verify', action='store_true', help='验证已有标定')
+    parser.add_argument('--auto', action='store_true',
+                        help='全自动标定 (红贴纸识别, 无需点击, 适合 Pi5)')
     parser.add_argument('--points', type=str, help='自定义标定点 JSON 文件')
     parser.add_argument('--camera', type=int, default=RGB_DEVICE, help='RGB 相机编号')
     parser.add_argument('--grab-z', type=float, default=DEFAULT_GRAB_Z, help='抓取 Z 高度 (mm)')
+    parser.add_argument('--center', type=str, default=None,
+                        help='工作区中心 "x,y" mm, 默认 230,0')
+    parser.add_argument('--size', type=str, default=None,
+                        help='工作区尺寸 "宽,深" mm, 默认 400,400')
+    parser.add_argument('--calib-z', type=float, default=DEFAULT_CALIB_Z,
+                        help='标定高度 mm (红贴纸尖端高度), 默认 150')
+    parser.add_argument('--grid', type=int, default=DEFAULT_GRID,
+                        help='网格每边点数, 3=9点 4=16点, 默认 3')
+    parser.add_argument('--samples', type=int, default=5,
+                        help='自动模式每点采样帧数, 默认 5')
+    parser.add_argument('--confirm', action='store_true',
+                        help='逐点确认模式 (每点暂停等输入 y/s/q)')
+    parser.add_argument('--safe-z', type=float, default=280.0,
+                        help='安全过渡高度 mm, 默认 280')
     args = parser.parse_args()
+
+    # 解析工作区参数
+    center = DEFAULT_CENTER
+    if args.center:
+        _cx, _cy = args.center.split(',')
+        center = (float(_cx), float(_cy))
+    size = DEFAULT_SIZE
+    if args.size:
+        _sw, _sd = args.size.split(',')
+        size = (float(_sw), float(_sd))
 
     # 初始化硬件
     print("连接机械臂...")
@@ -369,12 +609,27 @@ def main():
 
         if args.verify:
             verify_calibration(robot, camera)
-        else:
-            # 加载自定义标定点
-            points = None
+        elif args.auto:
+            # 全自动标定: 生成网格点 + 红贴纸识别
             if args.points:
                 with open(args.points) as f:
                     points = [tuple(p) for p in json.load(f)]
+            else:
+                points = generate_grid_points(center, size, args.calib_z, args.grid)
+            print(f"工作区: 中心={center} 尺寸={size} 高度={args.calib_z}mm 网格={args.grid}x{args.grid}")
+            detector = ColorBlockDetector() if ColorBlockDetector else None
+            cal = AutoCalibrator(robot, camera, points, detector,
+                                 grab_z=args.grab_z, samples=args.samples,
+                                 safe_z=args.safe_z, confirm=args.confirm)
+            cal.run()
+        else:
+            # 交互标定 (需要显示器 + 鼠标点击)
+            if args.points:
+                with open(args.points) as f:
+                    points = [tuple(p) for p in json.load(f)]
+            else:
+                # 默认也用网格生成, 而非写死的 4 点
+                points = generate_grid_points(center, size, args.calib_z, args.grid)
 
             # 设置 grab_z
             calibrator = InteractiveCalibrator(robot, camera, points)

@@ -339,7 +339,7 @@ def main():
     calibration = None
 
     # Initialize tools
-    agent_tools = create_agent_tools(robot, camera, detector, calibration)
+    agent_tools = create_agent_tools(robot, camera, detector, calibration, hailo_detector)
     
     print(f"🧠 Model ready: {args.model}")
     print(f"🌐 Web UI: http://0.0.0.0:{args.web_port}")

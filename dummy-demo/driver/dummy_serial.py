@@ -53,7 +53,7 @@ JOINT_LIMITS = {
 
 # 夹爪参数 (通过 J6 联动)
 GRIPPER_OPEN_ANGLE = -60.0    # J6 角度: 张开
-GRIPPER_CLOSE_ANGLE = 60.0    # J6 角度: 合拢
+GRIPPER_CLOSE_ANGLE = 210.0   # J6 角度: 合拢
 GRIPPER_MAX_ANGLE = 90.0      # J6 最大角度
 
 
@@ -128,12 +128,23 @@ class DummySerial:
     # ─── 低级命令 ────────────────────────────────────────────
 
     def _send(self, cmd: str, timeout: float = 2.0) -> str:
-        """发送命令并读取响应"""
+        """发送命令并读取响应 (带同步保护)"""
         if not self.connected:
             raise RuntimeError("未连接")
 
-        self._ser.read(self._ser.in_waiting)  # 清掉旧数据
+        # 彻底清空输入缓冲 (读到没数据为止, 避免上条命令残留响应)
+        flush_deadline = time.time() + 0.3
+        while time.time() < flush_deadline:
+            waiting = self._ser.in_waiting
+            if waiting:
+                self._ser.read(waiting)
+                time.sleep(0.02)
+            else:
+                break
+
+        self._ser.reset_input_buffer()
         self._ser.write(f"{cmd}\n".encode())
+        self._ser.flush()
         time.sleep(0.1)
 
         deadline = time.time() + timeout
@@ -141,9 +152,13 @@ class DummySerial:
         while time.time() < deadline:
             chunk = self._ser.read(self._ser.in_waiting or 1)
             data += chunk
+            # 等到出现完整响应行 (含 ok/err/started 等关键字 + 换行)
             if b'\n' in data:
-                break
-            time.sleep(0.05)
+                text = data.decode('utf-8', errors='replace')
+                # 确保至少有一行含关键字的完整响应
+                if any(k in text.lower() for k in ('ok', 'err', 'started', 'disabled')):
+                    break
+            time.sleep(0.03)
 
         return data.decode('utf-8', errors='replace').strip()
 
@@ -202,17 +217,27 @@ class DummySerial:
         logger.warning(f"GETJPOS 解析失败: {resp}")
         return self._joints.copy()
 
-    def get_cartesian_pose(self) -> List[float]:
-        """读取末端位姿 [X, Y, Z, A, B, C]"""
-        resp = self._send("#GETLPOS")
-        for line in resp.strip().split('\n'):
-            try:
-                parts = line.strip().split()
-                if parts[0] == "ok" and len(parts) >= 7:
-                    return [float(x) for x in parts[1:7]]
-            except (ValueError, IndexError):
-                continue
-        logger.warning(f"GETLPOS 解析失败: {resp}")
+    def get_cartesian_pose(self, retries: int = 3) -> List[float]:
+        """读取末端位姿 [X, Y, Z, A, B, C] (带合理性校验 + 重试)"""
+        for attempt in range(retries):
+            resp = self._send("#GETLPOS")
+            for line in resp.strip().split('\n'):
+                try:
+                    parts = line.strip().split()
+                    if parts[0] == "ok" and len(parts) >= 7:
+                        vals = [float(x) for x in parts[1:7]]
+                        # 合理性校验: 笛卡尔 X 通常 50~450mm, Z 通常 50~500mm
+                        # 避免误把关节角 [0,0,90,...] 当位姿
+                        x, z = vals[0], vals[2]
+                        if abs(x) < 1.0 and abs(vals[1]) < 1.0 and 85 < z < 95:
+                            # 看起来像关节角 [0,0,90,...], 不是位姿, 重试
+                            logger.warning(f"GETLPOS 返回可疑值 (像关节角): {vals}, 重试")
+                            break
+                        return vals
+                except (ValueError, IndexError):
+                    continue
+            time.sleep(0.1)
+        logger.warning(f"GETLPOS 解析失败 (已重试 {retries} 次): {resp}")
         return HOME_POSE.copy()
 
     # ─── 关节运动 ────────────────────────────────────────────

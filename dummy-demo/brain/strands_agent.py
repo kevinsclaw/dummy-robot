@@ -18,6 +18,7 @@ import json
 import time
 import logging
 import numpy as np
+import cv2
 from typing import Any, Dict, Optional
 from dataclasses import dataclass
 
@@ -58,15 +59,16 @@ SYSTEM_PROMPT = """你是 Dummy V2 机械臂的智能控制器。
 
 # ─── Strands Tool Functions ──────────────────────────────────
 
-def create_agent_tools(robot, camera=None, detector=None, calibration=None):
+def create_agent_tools(robot, camera=None, detector=None, calibration=None, hailo=None):
     """
     创建 Strands Agent 的 tool 函数集合。
     
     Args:
         robot: DummySerial 实例
         camera: Camera 实例 (可选, OpenCV VideoCapture 也行)
-        detector: ColorBlockDetector 或 HailoDetector 实例 (可选)
-        calibration: 手眼标定 (可选, detector 自带简单标定)
+        detector: ColorBlockDetector 实例 (可选, HSV 颜色检测)
+        calibration: 手眼标定 (可选)
+        hailo: HailoDetector 实例 (可选, YOLO 物体检测)
     
     Returns:
         list of tool functions
@@ -78,18 +80,19 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None):
     def detect_objects() -> str:
         """
         检测工作台上的所有物体。
-        返回每个物体的颜色、像素坐标和世界坐标(mm)。
-        如果相机/检测器不可用，返回错误信息。
+        使用两套检测系统:
+        1. Hailo-8 YOLOv6n: COCO 80类通用物体检测 (人、杯子、瓶子等)
+        2. HSV 颜色分割: 精确检测彩色方块
+        返回每个物体的类别、颜色、像素坐标和世界坐标(mm)。
         """
-        if not camera or not detector:
-            return json.dumps({"error": "视觉系统不可用 (相机/检测器缺失)"})
+        if not camera:
+            return json.dumps({"error": "视觉系统不可用 (相机缺失)"})
         
-        # 支持两种相机接口
+        # 拍照
         if hasattr(camera, 'read_color'):
             frame = camera.read_color()
         elif hasattr(camera, 'read'):
             ret = camera.read()
-            # cv2.VideoCapture.read() returns (bool, frame)
             if isinstance(ret, tuple):
                 success, frame = ret
                 if not success:
@@ -102,30 +105,82 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None):
         if frame is None:
             return json.dumps({"error": "相机读取失败"})
         
-        # 支持两种检测器 (ColorBlockDetector / HailoDetector)
-        objects = detector.detect(frame)
         results = []
-        for obj in objects:
-            # ColorBlockDetector 返回 Block (有 world_x/y)
-            # HailoDetector 返回 Detection (需要 calibration)
-            if hasattr(obj, 'world_x'):
-                wx, wy, wz = obj.world_x, obj.world_y, obj.world_z
-            elif calibration:
-                wx, wy, wz = calibration.pixel_to_world(obj.cx, obj.cy)
-            else:
-                wx, wy, wz = 0, 0, 0
+        
+        # 1. Hailo YOLO 检测 (通用物体)
+        if hailo and hailo._started:
+            try:
+                yolo_objects = hailo.detect(frame)
+                for obj in yolo_objects:
+                    if calibration:
+                        wx, wy, wz = calibration.pixel_to_world(obj.cx, obj.cy)
+                    else:
+                        wx, wy, wz = 0, 0, 0
+                    results.append({
+                        "name": obj.label,
+                        "color": obj.color,
+                        "source": "yolo",
+                        "confidence": round(obj.confidence, 2),
+                        "pixel": [obj.cx, obj.cy],
+                        "world_mm": [round(wx, 1), round(wy, 1), round(wz, 1)],
+                        "bbox": obj.bbox,
+                    })
+            except Exception as e:
+                pass  # YOLO 失败不影响 HSV
+        
+        # 2. HSV 颜色方块检测
+        if detector:
+            try:
+                color_objects = detector.detect(frame)
+                for obj in color_objects:
+                    if hasattr(obj, 'world_x'):
+                        wx, wy, wz = obj.world_x, obj.world_y, obj.world_z
+                    elif calibration:
+                        wx, wy, wz = calibration.pixel_to_world(obj.cx, obj.cy)
+                    else:
+                        wx, wy, wz = 0, 0, 0
+                    results.append({
+                        "name": f"{obj.color}_block",
+                        "color": obj.color,
+                        "source": "hsv",
+                        "confidence": 1.0,
+                        "pixel": [obj.cx, obj.cy],
+                        "world_mm": [round(wx, 1), round(wy, 1), round(wz, 1)],
+                        "size_px": getattr(obj, 'area_px', getattr(obj, 'area', 0)),
+                    })
+            except Exception as e:
+                pass  # HSV 失败不影响 YOLO
+        
+        # 3. Qwen3 VL 场景理解 (语义级检测)
+        vlm_description = ""
+        try:
+            import base64
+            import boto3
+            _, jpeg_buf = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            img_b64 = base64.b64encode(jpeg_buf.tobytes()).decode('utf-8')
             
-            results.append({
-                "name": f"{obj.color}_block",
-                "color": obj.color,
-                "pixel": [obj.cx, obj.cy],
-                "world_mm": [round(wx, 1), round(wy, 1), round(wz, 1)],
-                "size_px": getattr(obj, 'area_px', getattr(obj, 'area', 0)),
-            })
+            bedrock = boto3.client('bedrock-runtime', region_name='us-east-1')
+            vlm_response = bedrock.converse(
+                modelId='qwen.qwen3-vl-235b-a22b',
+                messages=[{
+                    'role': 'user',
+                    'content': [
+                        {'image': {'format': 'jpeg', 'source': {'bytes': jpeg_buf.tobytes()}}},
+                        {'text': '请描述图片中桌面上的所有物体，包括它们的位置关系、颜色、大小。用中文回答，简洁明了。'}
+                    ]
+                }],
+                inferenceConfig={'maxTokens': 300}
+            )
+            vlm_description = vlm_response['output']['message']['content'][0]['text']
+        except Exception as e:
+            vlm_description = f"场景分析不可用: {str(e)[:50]}"
         
         return json.dumps({
             "objects": results,
             "count": len(results),
+            "yolo_count": sum(1 for r in results if r.get("source") == "yolo"),
+            "hsv_count": sum(1 for r in results if r.get("source") == "hsv"),
+            "vlm_scene_description": vlm_description,
             "timestamp": time.strftime("%H:%M:%S"),
         })
 
@@ -224,6 +279,7 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None):
 # ─── Agent Setup ─────────────────────────────────────────────
 
 def create_dummy_agent(robot, camera=None, detector=None, calibration=None,
+                       hailo=None,
                        model_id: str = "qwen.qwen3-vl-235b-a22b",
                        provider: str = "bedrock",
                        region: str = "us-east-1"):
@@ -266,7 +322,7 @@ def create_dummy_agent(robot, camera=None, detector=None, calibration=None,
             region_name=region,
         )
     
-    tools = create_agent_tools(robot, camera, detector, calibration)
+    tools = create_agent_tools(robot, camera, detector, calibration, hailo)
     
     agent = Agent(
         model=model,

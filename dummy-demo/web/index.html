@@ -321,14 +321,25 @@
         // Init
         connect();
         
-        // Fetch initial status
-        fetch('/status').then(r => r.json()).then(data => {
-            if (data.position) {
-                document.getElementById('pos-x').textContent = data.position.x.toFixed(1);
-                document.getElementById('pos-y').textContent = data.position.y.toFixed(1);
-                document.getElementById('pos-z').textContent = data.position.z.toFixed(1);
-            }
-        });
+        // 定时轮询位置 (实时更新 X/Y/Z)
+        function pollStatus() {
+            fetch('/status').then(r => r.json()).then(data => {
+                if (data.position) {
+                    document.getElementById('pos-x').textContent = data.position.x.toFixed(1);
+                    document.getElementById('pos-y').textContent = data.position.y.toFixed(1);
+                    document.getElementById('pos-z').textContent = data.position.z.toFixed(1);
+                }
+                if (data.connected) {
+                    document.getElementById('status-dot').classList.remove('offline');
+                } else {
+                    document.getElementById('status-dot').classList.add('offline');
+                }
+            }).catch(() => {
+                document.getElementById('status-dot').classList.add('offline');
+            });
+        }
+        pollStatus();                  // 首次立即拉取
+        setInterval(pollStatus, 1000); // 每 1 秒刷新
     </script>
 </body>
 </html>
