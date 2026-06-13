@@ -50,8 +50,49 @@ async def index():
     return HTMLResponse(get_index_html())
 
 
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 import cv2 as _cv2
+import numpy as _np
+
+# 黄色标记 (小黄鱼) 默认 HSV 阈值, 可被前端滑块实时调整
+HSV_THRESH = {"h_lo": 18, "s_lo": 80, "v_lo": 80, "h_hi": 38, "s_hi": 255, "v_hi": 255}
+
+
+def generate_mask_mjpeg():
+    """Generator 产生黄色 HSV mask 的 MJPEG 流, 用于调试小黄鱼识别 / 调阈值"""
+    while True:
+        if camera_instance is None or not camera_instance.isOpened():
+            time.sleep(0.1)
+            continue
+        ret, frame = camera_instance.read()
+        if not ret:
+            time.sleep(0.03)
+            continue
+        hsv = _cv2.cvtColor(_cv2.GaussianBlur(frame, (5, 5), 0), _cv2.COLOR_BGR2HSV)
+        lo = _np.array([HSV_THRESH["h_lo"], HSV_THRESH["s_lo"], HSV_THRESH["v_lo"]])
+        hi = _np.array([HSV_THRESH["h_hi"], HSV_THRESH["s_hi"], HSV_THRESH["v_hi"]])
+        mask = _cv2.inRange(hsv, lo, hi)
+        mask = _cv2.morphologyEx(mask, _cv2.MORPH_OPEN, _np.ones((3, 3), _np.uint8))
+        # 把 mask 染成黄色叠在黑底上, 并标出最大块质心 (即标定会选中的点)
+        vis = _cv2.cvtColor(mask, _cv2.COLOR_GRAY2BGR)
+        vis[mask > 0] = (0, 255, 255)
+        cnts, _ = _cv2.findContours(mask, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
+        cnts = [c for c in cnts if _cv2.contourArea(c) >= 30]
+        _cv2.putText(vis, f"yellow blobs: {len(cnts)}", (10, 25),
+                     _cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        if cnts:
+            biggest = max(cnts, key=_cv2.contourArea)
+            M = _cv2.moments(biggest)
+            if M["m00"] != 0:
+                cx, cy = int(M["m10"] / M["m00"]), int(M["m01"] / M["m00"])
+                _cv2.circle(vis, (cx, cy), 8, (0, 0, 255), 2)
+                _cv2.putText(vis, f"({cx},{cy}) area={int(_cv2.contourArea(biggest))}",
+                             (cx + 10, cy), _cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
+        _, jpeg = _cv2.imencode('.jpg', vis, [_cv2.IMWRITE_JPEG_QUALITY, 70])
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+        time.sleep(0.05)  # ~20fps, mask 不需要那么快
+
 
 def generate_mjpeg():
     """Generator 产生 MJPEG 帧，叠加 Hailo 检测结果"""
@@ -108,6 +149,35 @@ async def video_feed():
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"}
     )
+
+
+@app.get("/mask_feed")
+async def mask_feed():
+    """实时黄色 HSV mask 流 (调试小黄鱼识别)"""
+    if camera_instance is None:
+        return HTMLResponse("<h3>相机未连接</h3>", status_code=503)
+    return StreamingResponse(
+        generate_mask_mjpeg(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"}
+    )
+
+
+@app.get("/get_hsv")
+async def get_hsv():
+    """返回当前 HSV 阈值"""
+    return JSONResponse(HSV_THRESH)
+
+
+@app.get("/set_hsv")
+async def set_hsv(h_lo: int = None, s_lo: int = None, v_lo: int = None,
+                  h_hi: int = None, s_hi: int = None, v_hi: int = None):
+    """前端滑块实时更新 HSV 阈值"""
+    for k, v in {"h_lo": h_lo, "s_lo": s_lo, "v_lo": v_lo,
+                 "h_hi": h_hi, "s_hi": s_hi, "v_hi": v_hi}.items():
+        if v is not None:
+            HSV_THRESH[k] = max(0, min(255, int(v)))
+    return JSONResponse(HSV_THRESH)
 
 
 @app.get("/status")
