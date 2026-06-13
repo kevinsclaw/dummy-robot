@@ -372,7 +372,7 @@ class AutoCalibrator:
 
     def __init__(self, robot, camera, points, detector=None,
                  grab_z=DEFAULT_GRAB_Z, settle=1.5, samples=5,
-                 safe_z=280.0, confirm=False):
+                 safe_z=280.0, confirm=False, direct_move=False):
         self.robot = robot
         self.camera = camera
         self.points = points
@@ -383,6 +383,7 @@ class AutoCalibrator:
         self.samples = samples    # 每点采样帧数 (取中值降噪)
         self.safe_z = safe_z      # 安全过渡高度 (点间先抬到这个高度)
         self.confirm = confirm    # 逐点确认模式
+        self.direct_move = direct_move  # 直接移动 (点间不抬过渡高度)
 
     def _read_frame(self):
         cam = self.camera
@@ -450,12 +451,18 @@ class AutoCalibrator:
                     failed.append(i + 1)
                     continue
 
-            # 先抬到安全高度 (同 X,Y 但高 Z), 避免贴桌面横扫
-            self.robot.move_cartesian(x, y, self.safe_z, a, b, c)
-            time.sleep(self.settle)
-            # 再下降到标定高度
-            self.robot.move_cartesian(x, y, z, a, b, c)
-            time.sleep(self.settle)
+            # 移动到标定点
+            if getattr(self, 'direct_move', False):
+                # 直接移动: 点间直接到目标 (x,y,z), 不抬过渡高度
+                self.robot.move_cartesian(x, y, z, a, b, c)
+                time.sleep(self.settle)
+            else:
+                # 先抬到安全高度 (同 X,Y 但高 Z), 避免贴桌面横扫
+                self.robot.move_cartesian(x, y, self.safe_z, a, b, c)
+                time.sleep(self.settle)
+                # 再下降到标定高度
+                self.robot.move_cartesian(x, y, z, a, b, c)
+                time.sleep(self.settle)
 
             pixel = self._detect_at_point()
             if pixel is None:
@@ -467,10 +474,11 @@ class AutoCalibrator:
             print(f"  ✓ 像素 ({pixel[0]:.0f}, {pixel[1]:.0f}) → 坐标 ({x:.0f}, {y:.0f})")
             sys.stdout.flush()
 
-        # 标定结束, 抬回安全高度
+        # 标定结束, 抬回安全高度 (直接移动模式下不抬, 保持在标定平面)
         try:
             last = self.points[0]
-            self.robot.move_cartesian(last[0], last[1], self.safe_z, last[3], last[4], last[5])
+            if not getattr(self, 'direct_move', False):
+                self.robot.move_cartesian(last[0], last[1], self.safe_z, last[3], last[4], last[5])
         except Exception:
             pass
 
@@ -578,6 +586,8 @@ def main():
                         help='逐点确认模式 (每点暂停等输入 y/s/q)')
     parser.add_argument('--safe-z', type=float, default=280.0,
                         help='安全过渡高度 mm, 默认 280')
+    parser.add_argument('--direct', action='store_true',
+                        help='直接移动: 点间直接到目标不抬过渡高度 (忽略 --safe-z)')
     args = parser.parse_args()
 
     # 解析工作区参数
@@ -620,7 +630,8 @@ def main():
             detector = ColorBlockDetector() if ColorBlockDetector else None
             cal = AutoCalibrator(robot, camera, points, detector,
                                  grab_z=args.grab_z, samples=args.samples,
-                                 safe_z=args.safe_z, confirm=args.confirm)
+                                 safe_z=args.safe_z, confirm=args.confirm,
+                                 direct_move=args.direct)
             cal.run()
         else:
             # 交互标定 (需要显示器 + 鼠标点击)
