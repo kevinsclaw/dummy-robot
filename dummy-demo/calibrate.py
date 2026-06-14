@@ -45,11 +45,29 @@ from pathlib import Path
 # 添加 parent 到路径
 sys.path.insert(0, str(Path(__file__).parent))
 from driver.dummy_serial import DummySerial
-from vision.camera import Camera
+from vision.orbbec_camera import open_camera
 try:
     from vision.color_detector import ColorBlockDetector
 except Exception:
     ColorBlockDetector = None
+
+
+def read_rgb_frame(cam):
+    """统一读帧 helper: 兼容 OrbbecCamera / cv2.VideoCapture / 旧 Camera。
+    返回 BGR 帧或 None。"""
+    if cam is None:
+        return None
+    if hasattr(cam, 'read_color'):
+        return cam.read_color()
+    if hasattr(cam, 'read_rgb'):
+        return cam.read_rgb()
+    if hasattr(cam, 'read'):
+        ret = cam.read()
+        if isinstance(ret, tuple):
+            ok, f = ret
+            return f if ok else None
+        return ret
+    return None
 
 logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
@@ -249,7 +267,7 @@ class CalibrationData:
 class InteractiveCalibrator:
     """交互式标定工具"""
 
-    def __init__(self, robot: DummySerial, camera: Camera,
+    def __init__(self, robot: DummySerial, camera,
                  points: List[Tuple] = None):
         self.robot = robot
         self.camera = camera
@@ -308,7 +326,7 @@ class InteractiveCalibrator:
         self._click_point = None
 
         while True:
-            frame = self.camera.read_rgb()
+            frame = read_rgb_frame(self.camera)
             if frame is None:
                 time.sleep(0.1)
                 continue
@@ -493,7 +511,7 @@ class AutoCalibrator:
 
 # ─── 验证工具 ─────────────────────────────────────────────────
 
-def verify_calibration(robot: DummySerial, camera: Camera):
+def verify_calibration(robot: DummySerial, camera):
     """验证标定精度"""
     cal = CalibrationData.load()
     print(f"\n已加载标定 (误差: {cal.error_mm:.2f} mm)")
@@ -512,7 +530,7 @@ def verify_calibration(robot: DummySerial, camera: Camera):
 
     try:
         while True:
-            frame = camera.read_rgb()
+            frame = read_rgb_frame(camera)
             if frame is None:
                 time.sleep(0.1)
                 continue
@@ -600,8 +618,12 @@ def main():
         sys.exit(1)
 
     print("启动相机...")
-    camera = Camera(rgb_device=args.camera, enable_depth=False)
-    camera.start()
+    camera, cam_label = open_camera()
+    if camera is None:
+        print("错误: 未检测到相机")
+        robot.disconnect()
+        sys.exit(1)
+    print(f"📷 {cam_label}")
 
     try:
         # 机械臂回零
@@ -640,7 +662,10 @@ def main():
             calibrator.run()
 
     finally:
-        camera.stop()
+        if hasattr(camera, 'stop'):
+            camera.stop()
+        elif hasattr(camera, 'release'):
+            camera.release()
         robot.disconnect()
 
 
