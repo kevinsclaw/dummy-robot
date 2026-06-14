@@ -129,6 +129,32 @@ def generate_grid_points(center, size, z, grid=3, pose=DEFAULT_POSE):
     return points
 
 
+def generate_grid_points_multilayer(center, size, z_layers, grid=3, pose=DEFAULT_POSE):
+    """
+    在多个高度层各生成一个平面网格, 用于 3D 手眼标定。
+
+    纯单一平面的标定点对刚体变换的 Z 轴是欠定的 (estimateAffine3D 第三行
+    被深度噪声主导)。在多个高度各采一层, 给 Z 方向真正的杠杆臂, 让 R|t 的
+    z 行被充分约束, 3D 标定精度显著更稳。
+
+    Args:
+        center: (cx, cy) 工作区中心 mm
+        size: (w, d) 工作区宽深 mm
+        z_layers: List[float] 各标定层高度 mm, 例如 [100, 150, 200]
+        grid: 每层每边点数 (每层点数 = grid*grid)
+        pose: (a, b, c) 末端姿态
+    Returns:
+        List[(x, y, z, a, b, c)], 按 (层 → 层内距中心远近) 排序
+    """
+    cx, cy = center
+    layers = sorted(set(z_layers))  # 去重并从低到高, 避免重复层
+    all_points = []
+    for z in layers:
+        layer_pts = generate_grid_points(center, size, z, grid=grid, pose=pose)
+        all_points.extend(layer_pts)
+    return all_points
+
+
 def detect_red_marker(frame, detector=None):
     """
     自动检测画面中的标记 (夹爪上的标定物)。
@@ -725,6 +751,9 @@ def main():
                         help='工作区尺寸 "宽,深" mm, 默认 400,400')
     parser.add_argument('--calib-z', type=float, default=DEFAULT_CALIB_Z,
                         help='标定高度 mm (小黄鱼标记高度), 默认 150')
+    parser.add_argument('--z-layers', dest='z_layers', type=str, default=None,
+                        help='3D 标定多高度层, 逗号分隔 mm, 例如 100,150,200 '
+                             '(每层一个网格, 给 Z 轴杠杆臂; 仅 --3d 有意义)')
     parser.add_argument('--grid', type=int, default=DEFAULT_GRID,
                         help='网格每边点数, 3=9点 4=16点, 默认 3')
     parser.add_argument('--samples', type=int, default=5,
@@ -778,8 +807,19 @@ def main():
                 with open(args.points) as f:
                     points = [tuple(p) for p in json.load(f)]
             else:
-                points = generate_grid_points(center, size, args.calib_z, args.grid)
-            print(f"工作区: 中心={center} 尺寸={size} 高度={args.calib_z}mm 网格={args.grid}x{args.grid}")
+                cal_mode_pre = "3d" if args.use_3d else "2d"
+                z_layers = None
+                if args.z_layers:
+                    z_layers = [float(s) for s in args.z_layers.split(',') if s.strip()]
+                if cal_mode_pre == "3d" and z_layers:
+                    points = generate_grid_points_multilayer(center, size, z_layers, args.grid)
+                    print(f"工作区: 中心={center} 尺寸={size} 多高度层={z_layers}mm "
+                          f"网格={args.grid}x{args.grid} 共{len(points)}点")
+                else:
+                    if z_layers and cal_mode_pre != "3d":
+                        print("⚠️  --z-layers 仅 --3d 模式生效, 已忽略")
+                    points = generate_grid_points(center, size, args.calib_z, args.grid)
+                    print(f"工作区: 中心={center} 尺寸={size} 高度={args.calib_z}mm 网格={args.grid}x{args.grid}")
             detector = ColorBlockDetector() if ColorBlockDetector else None
             cal_mode = "3d" if args.use_3d else "2d"
             if cal_mode == "3d" and not hasattr(camera, "pixel_depth_to_camera_3d"):
