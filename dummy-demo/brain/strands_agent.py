@@ -52,6 +52,11 @@ SYSTEM_PROMPT = """你是 Dummy V2 机械臂的智能控制器。
 - 如果检测不到目标物体，询问用户而不是盲目尝试
 - 连续 3 次失败后停止并报告
 
+## 深度感知 (Gemini 335)
+- 相机提供 RGB + 深度。detect_objects 返回的每个物体可能带 depth_mm (该像素到相机的距离)。
+- 需要某点准确距离时用 measure_depth(pixel_x, pixel_y)。
+- 抓取前建议先 measure_depth 确认物体真实距离, 再决定下降深度, 别只靠猜。
+
 ## 颜色方块 Demo
 工作台上有彩色方块 (约 25mm 边长)。
 常见任务: 按颜色分拣、堆叠、放到指定位置。
@@ -106,6 +111,26 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None, hail
             return json.dumps({"error": "相机读取失败"})
         
         results = []
+
+        # 深度查询辅助: 仅当相机是 Gemini335 (有 depth_at) 时可用
+        def _depth_mm_at(px, py):
+            if not hasattr(camera, "depth_at"):
+                return None
+            try:
+                # 彩色与深度分辨率可能不同, 按比例把彩色像素映射到深度图
+                draw = camera.latest_depth() if hasattr(camera, "latest_depth") else None
+                if draw is None:
+                    return None
+                ch, cw = frame.shape[:2]
+                dh, dw = draw.shape[:2]
+                dx = int(px * dw / cw)
+                dy = int(py * dh / ch)
+                z = camera.depth_at(dx, dy)
+                if z is None or z <= 0:
+                    return None
+                return round(float(z), 1)
+            except Exception:
+                return None
         
         # 1. Hailo YOLO 检测 (通用物体)
         if hailo and hailo._started:
@@ -123,6 +148,7 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None, hail
                         "confidence": round(obj.confidence, 2),
                         "pixel": [obj.cx, obj.cy],
                         "world_mm": [round(wx, 1), round(wy, 1), round(wz, 1)],
+                        "depth_mm": _depth_mm_at(obj.cx, obj.cy),
                         "bbox": obj.bbox,
                     })
             except Exception as e:
@@ -146,6 +172,7 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None, hail
                         "confidence": 1.0,
                         "pixel": [obj.cx, obj.cy],
                         "world_mm": [round(wx, 1), round(wy, 1), round(wz, 1)],
+                        "depth_mm": _depth_mm_at(obj.cx, obj.cy),
                         "size_px": getattr(obj, 'area_px', getattr(obj, 'area', 0)),
                     })
             except Exception as e:
@@ -272,8 +299,52 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None, hail
         time.sleep(0.5)
         return json.dumps({"status": "ok", "gripper_position": position})
 
+    @tool
+    def measure_depth(pixel_x: int = None, pixel_y: int = None) -> str:
+        """
+        用 Gemini 335 深度相机测量距离。
+        用于抓取前确认物体的真实距离 (Z 深度), 避免只靠 2D 猜高度。
+
+        Args:
+            pixel_x: 查询点的像素 X (按彩色图分辨率)。不传=画面中心。
+            pixel_y: 查询点的像素 Y。不传=画面中心。
+
+        Returns:
+            该点的深度 (mm) + 整幅深度统计 (最近/中位/最远)
+        """
+        if not camera or not hasattr(camera, "latest_depth"):
+            return json.dumps({"error": "深度不可用 (需 Gemini 335 相机)"})
+        depth = camera.latest_depth()
+        if depth is None:
+            return json.dumps({"error": "未取到深度帧"})
+        h, w = depth.shape
+        # 默认画面中心
+        px = w // 2 if pixel_x is None else int(pixel_x)
+        py = h // 2 if pixel_y is None else int(pixel_y)
+        px = max(0, min(w - 1, px))
+        py = max(0, min(h - 1, py))
+        z = camera.depth_at(px, py)
+        valid = depth[depth > 0]
+        stats = {}
+        if valid.size > 0:
+            scale = getattr(camera, "_depth_scale", 1.0) or 1.0
+            stats = {
+                "nearest_mm": round(float(valid.min()) * scale, 1),
+                "median_mm": round(float(np.median(valid)) * scale, 1),
+                "farthest_mm": round(float(valid.max()) * scale, 1),
+                "valid_ratio": round(float(valid.size) / depth.size, 2),
+            }
+        return json.dumps({
+            "status": "ok",
+            "query_pixel": [px, py],
+            "depth_mm": round(float(z), 1) if (z and z > 0) else None,
+            "depth_resolution": [w, h],
+            "scene": stats,
+        })
+
     return [detect_objects, move_to, open_gripper, close_gripper, 
-            home, get_current_position, move_joints, set_gripper_position]
+            home, get_current_position, move_joints, set_gripper_position,
+            measure_depth]
 
 
 # ─── Agent Setup ─────────────────────────────────────────────
