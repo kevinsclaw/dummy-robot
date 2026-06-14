@@ -139,6 +139,23 @@ def generate_mjpeg():
         time.sleep(0.033)  # ~30fps
 
 
+def generate_depth_mjpeg():
+    """Generator 产生深度伪彩 MJPEG 流 (仅 Gemini335/Orbbec 可用)"""
+    while True:
+        cam = camera_instance
+        if cam is None or not hasattr(cam, "read_depth_colormap"):
+            time.sleep(0.2)
+            continue
+        ret, vis = cam.read_depth_colormap()
+        if not ret or vis is None:
+            time.sleep(0.05)
+            continue
+        _, jpeg = _cv2.imencode('.jpg', vis, [_cv2.IMWRITE_JPEG_QUALITY, 70])
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + jpeg.tobytes() + b'\r\n')
+        time.sleep(0.05)  # ~20fps
+
+
 @app.get("/video_feed")
 async def video_feed():
     """实时 MJPEG 视频流"""
@@ -146,6 +163,18 @@ async def video_feed():
         return HTMLResponse("<h3>相机未连接</h3>", status_code=503)
     return StreamingResponse(
         generate_mjpeg(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"}
+    )
+
+
+@app.get("/depth_feed")
+async def depth_feed():
+    """实时深度伪彩流 (Gemini335)"""
+    if camera_instance is None or not hasattr(camera_instance, "read_depth_colormap"):
+        return HTMLResponse("<h3>深度相机未连接</h3>", status_code=503)
+    return StreamingResponse(
+        generate_depth_mjpeg(),
         media_type="multipart/x-mixed-replace; boundary=frame",
         headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache"}
     )
@@ -366,18 +395,33 @@ def main():
             model_id=args.model,
         )
     
-    # Initialize camera (RGB, /dev/video0 on Pi5)
+    # Initialize camera — 优先 Orbbec Gemini 335 (RGB + 深度), 否则回退 USB /dev/video0
     global camera_instance
     import cv2
-    camera = cv2.VideoCapture(0)
-    if camera.isOpened():
-        camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        camera_instance = camera
-        print("📷 相机已连接 (640x480 RGB)")
-    else:
-        print("⚠️  相机未检测到，视觉功能不可用")
-        camera = None
+    camera = None
+    try:
+        from vision.orbbec_camera import OrbbecCamera
+        ob_cam = OrbbecCamera()
+        if ob_cam.start():
+            camera = ob_cam
+            camera_instance = ob_cam
+            print("📷 Gemini 335 已连接 (RGB + 深度, pyorbbecsdk v2)")
+        else:
+            print("⚠️  Gemini 335 未取到流，尝试 USB 摄像头")
+    except Exception as e:
+        print(f"⚠️  Orbbec 初始化失败 ({e})，尝试 USB 摄像头")
+
+    if camera is None:
+        usb = cv2.VideoCapture(0)
+        if usb.isOpened():
+            usb.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+            usb.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            camera = usb
+            camera_instance = usb
+            print("📷 USB 相机已连接 (640x480 RGB)")
+        else:
+            print("⚠️  相机未检测到，视觉功能不可用")
+            camera = None
 
     # 颜色方块检测器
     detector = None
