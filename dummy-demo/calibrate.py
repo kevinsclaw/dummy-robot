@@ -161,12 +161,19 @@ def detect_red_marker(frame, detector=None):
 # ─── 标定数据结构 ─────────────────────────────────────────────
 
 class CalibrationData:
-    """标定数据"""
+    """标定数据。支持两种模式:
+      - "2d": 像素(u,v) -> 机械臂(x,y), 2x3 仿射 (Z 写死 grab_z)
+      - "3d": 相机系 3D(Xc,Yc,Zc) -> 机械臂基座 3D(x,y,z), 4x4 刚体变换
+             (需深度相机, 能抳不同高度/斜放物体)
+    """
 
-    def __init__(self):
-        self.pixel_points: List[Tuple[float, float]] = []   # (u, v)
-        self.robot_points: List[Tuple[float, float]] = []   # (x, y)
-        self.transform_matrix: Optional[np.ndarray] = None  # 2x3 仿射矩阵
+    def __init__(self, mode: str = "2d"):
+        self.mode = mode
+        self.pixel_points: List[Tuple[float, float]] = []   # (u, v) — 2d
+        self.robot_points: List[Tuple[float, float]] = []   # (x, y) — 2d
+        self.cam_points_3d: List[Tuple[float, float, float]] = []    # (Xc,Yc,Zc) — 3d
+        self.robot_points_3d: List[Tuple[float, float, float]] = []  # (x,y,z) — 3d
+        self.transform_matrix: Optional[np.ndarray] = None  # 2x3 (2d) 或 3x4 (3d)
         self.grab_z: float = DEFAULT_GRAB_Z
         self.error_mm: float = 0.0  # 标定误差
 
@@ -174,8 +181,35 @@ class CalibrationData:
         self.pixel_points.append(pixel)
         self.robot_points.append(robot)
 
+    def add_point_3d(self, cam_xyz: Tuple[float, float, float],
+                     robot_xyz: Tuple[float, float, float]):
+        self.cam_points_3d.append(cam_xyz)
+        self.robot_points_3d.append(robot_xyz)
+
     def compute(self) -> bool:
-        """计算仿射变换矩阵"""
+        """计算变换 (按 mode 分支)"""
+        if self.mode == "3d":
+            return self._compute_3d()
+        return self._compute_2d()
+
+    def _compute_3d(self) -> bool:
+        """3D 刚体变换: 相机系 3D -> 机械臂 3D, 用 estimateAffine3D"""
+        if len(self.cam_points_3d) < 4:
+            logger.error("3D 标定至少需要 4 个点")
+            return False
+        src = np.array(self.cam_points_3d, dtype=np.float32)
+        dst = np.array(self.robot_points_3d, dtype=np.float32)
+        # estimateAffine3D 返回 3x4 仿射 (含轻微缩放/剪切, 对深度噪声更鲁棒)
+        retval, M, inliers = cv2.estimateAffine3D(src, dst)
+        if not retval or M is None:
+            logger.error("estimateAffine3D 失败")
+            return False
+        self.transform_matrix = M  # 3x4
+        self._compute_error_3d()
+        return True
+
+    def _compute_2d(self) -> bool:
+        """计算 2D 仿射变换矩阵"""
         if len(self.pixel_points) < 3:
             logger.error("至少需要 3 个标定点")
             return False
@@ -208,6 +242,25 @@ class CalibrationData:
         self._compute_error()
         return True
 
+    def _compute_error_3d(self):
+        """3D 重投影误差 (欧氏距离 mm)"""
+        if self.transform_matrix is None:
+            return
+        errors = []
+        for cam, robot in zip(self.cam_points_3d, self.robot_points_3d):
+            pred = self.camera_to_robot(*cam)
+            err = np.sqrt(sum((pred[k] - robot[k])**2 for k in range(3)))
+            errors.append(err)
+        self.error_mm = float(np.mean(errors))
+
+    def camera_to_robot(self, Xc: float, Yc: float, Zc: float) -> Tuple[float, float, float]:
+        """相机系 3D 点 -> 机械臂基座 3D 点 (仅 3d 模式)"""
+        if self.transform_matrix is None or self.mode != "3d":
+            raise RuntimeError("未进行 3D 标定")
+        pt = np.array([Xc, Yc, Zc, 1.0])
+        r = self.transform_matrix @ pt  # 3x4 @ 4 -> 3
+        return (float(r[0]), float(r[1]), float(r[2]))
+
     def _compute_error(self):
         """计算标定重投影误差"""
         if self.transform_matrix is None:
@@ -231,8 +284,11 @@ class CalibrationData:
         """保存标定结果"""
         path = path or str(CALIBRATION_FILE)
         data = {
+            'mode': self.mode,
             'pixel_points': self.pixel_points,
             'robot_points': self.robot_points,
+            'cam_points_3d': self.cam_points_3d,
+            'robot_points_3d': self.robot_points_3d,
             'transform_matrix': self.transform_matrix.tolist(),
             'grab_z': self.grab_z,
             'error_mm': self.error_mm,
@@ -240,7 +296,7 @@ class CalibrationData:
         }
         with open(path, 'w') as f:
             json.dump(data, f, indent=2)
-        logger.info(f"标定数据已保存: {path}")
+        logger.info(f"标定数据已保存: {path} (mode={self.mode})")
         logger.info(f"  误差: {self.error_mm:.2f} mm")
 
     @classmethod
@@ -253,9 +309,11 @@ class CalibrationData:
         with open(path) as f:
             data = json.load(f)
 
-        cal = cls()
-        cal.pixel_points = [tuple(p) for p in data['pixel_points']]
-        cal.robot_points = [tuple(p) for p in data['robot_points']]
+        cal = cls(mode=data.get('mode', '2d'))
+        cal.pixel_points = [tuple(p) for p in data.get('pixel_points', [])]
+        cal.robot_points = [tuple(p) for p in data.get('robot_points', [])]
+        cal.cam_points_3d = [tuple(p) for p in data.get('cam_points_3d', [])]
+        cal.robot_points_3d = [tuple(p) for p in data.get('robot_points_3d', [])]
         cal.transform_matrix = np.array(data['transform_matrix'])
         cal.grab_z = data.get('grab_z', DEFAULT_GRAB_Z)
         cal.error_mm = data.get('error_mm', 0.0)
@@ -382,18 +440,39 @@ class AutoCalibrator:
 
     def __init__(self, robot, camera, points, detector=None,
                  grab_z=DEFAULT_GRAB_Z, settle=1.5, samples=5,
-                 safe_z=280.0, confirm=False, direct_move=False):
+                 safe_z=280.0, confirm=False, direct_move=False, mode="2d"):
         self.robot = robot
         self.camera = camera
         self.points = points
         self.detector = detector
-        self.calibration = CalibrationData()
+        self.mode = mode
+        self.calibration = CalibrationData(mode=mode)
         self.calibration.grab_z = grab_z
         self.settle = settle      # 移动后稳定等待 (秒)
         self.samples = samples    # 每点采样帧数 (取中值降噪)
         self.safe_z = safe_z      # 安全过渡高度 (点间先抬到这个高度)
         self.confirm = confirm    # 逐点确认模式
         self.direct_move = direct_move  # 直接移动 (点间不抬过渡高度)
+
+    def _pixel_to_cam3d(self, u, v):
+        """彩色图像素 (u,v) -> 相机系 3D 点 (mm)。
+        像素在彩色图分辨率, 需按比例映射到深度图再查深度+反投影。"""
+        cam = self.camera
+        if not hasattr(cam, "pixel_depth_to_camera_3d"):
+            return None
+        depth = cam.latest_depth() if hasattr(cam, "latest_depth") else None
+        if depth is None:
+            return None
+        # 彩色帧分辨率
+        frame = self._read_frame()
+        if frame is None:
+            return None
+        ch, cw = frame.shape[:2]
+        dh, dw = depth.shape[:2]
+        du = u * dw / cw
+        dv = v * dh / ch
+        return cam.pixel_depth_to_camera_3d(du, dv)
+
 
     def _read_frame(self):
         cam = self.camera
@@ -480,8 +559,22 @@ class AutoCalibrator:
                 sys.stdout.flush()
                 failed.append(i + 1)
                 continue
-            self.calibration.add_point(pixel, (x, y))
-            print(f"  ✓ 像素 ({pixel[0]:.0f}, {pixel[1]:.0f}) → 坐标 ({x:.0f}, {y:.0f})")
+
+            if self.mode == "3d":
+                cam3d = self._pixel_to_cam3d(pixel[0], pixel[1])
+                if cam3d is None:
+                    print(f"  ⚠️ 该点无深度/无内参, 跳过 (像素 {pixel[0]:.0f},{pixel[1]:.0f})")
+                    sys.stdout.flush()
+                    failed.append(i + 1)
+                    continue
+                # 机械臂端用真实 3D (x,y,z)
+                self.calibration.add_point_3d(cam3d, (x, y, z))
+                # 同时保留 2D 点备查
+                self.calibration.add_point(pixel, (x, y))
+                print(f"  ✓ 像素({pixel[0]:.0f},{pixel[1]:.0f}) 深度系({cam3d[0]:.0f},{cam3d[1]:.0f},{cam3d[2]:.0f}) → 机械臂({x:.0f},{y:.0f},{z:.0f})")
+            else:
+                self.calibration.add_point(pixel, (x, y))
+                print(f"  ✓ 像素 ({pixel[0]:.0f}, {pixel[1]:.0f}) → 坐标 ({x:.0f}, {y:.0f})")
             sys.stdout.flush()
 
         # 标定结束, 抬回安全高度 (直接移动模式下不抬, 保持在标定平面)
@@ -541,14 +634,27 @@ def verify_calibration(robot: DummySerial, camera):
 
             if click_point[0]:
                 u, v = click_point[0]
-                x, y = cal.pixel_to_robot(u, v)
-                cv2.circle(display, (u, v), 10, (0, 255, 0), 2)
-                cv2.putText(display, f"({x:.1f}, {y:.1f})",
-                            (u + 15, v), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
-
-                print(f"  像素 ({u}, {v}) → 坐标 ({x:.1f}, {y:.1f}, {cal.grab_z:.1f})")
-                robot.move_cartesian(x, y, cal.grab_z, 0, 90, 0)
-                click_point[0] = None
+                if cal.mode == "3d" and hasattr(camera, "pixel_depth_to_camera_3d"):
+                    xyz = pixel_depth_to_robot(u, v, camera, cal)
+                    if xyz is None:
+                        print(f"  像素 ({u}, {v}) 无深度, 跳过")
+                        click_point[0] = None
+                    else:
+                        x, y, z = xyz
+                        cv2.circle(display, (u, v), 10, (0, 255, 0), 2)
+                        cv2.putText(display, f"({x:.0f},{y:.0f},{z:.0f})",
+                                    (u + 15, v), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                        print(f"  像素 ({u}, {v}) → 3D 坐标 ({x:.1f}, {y:.1f}, {z:.1f})")
+                        robot.move_cartesian(x, y, z, 0, 90, 0)
+                        click_point[0] = None
+                else:
+                    x, y = cal.pixel_to_robot(u, v)
+                    cv2.circle(display, (u, v), 10, (0, 255, 0), 2)
+                    cv2.putText(display, f"({x:.1f}, {y:.1f})",
+                                (u + 15, v), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    print(f"  像素 ({u}, {v}) → 坐标 ({x:.1f}, {y:.1f}, {cal.grab_z:.1f})")
+                    robot.move_cartesian(x, y, cal.grab_z, 0, 90, 0)
+                    click_point[0] = None
 
             cv2.imshow(window, display)
             if cv2.waitKey(30) & 0xFF == 27:
@@ -565,10 +671,41 @@ def load_calibration(path: Optional[str] = None) -> CalibrationData:
 
 
 def pixel_to_robot_xy(u: float, v: float, cal: Optional[CalibrationData] = None) -> Tuple[float, float]:
-    """像素→机器人XY (便捷函数)"""
+    """像素→机器人XY (便捷函数, 2D 模式)"""
     if cal is None:
         cal = CalibrationData.load()
     return cal.pixel_to_robot(u, v)
+
+
+def pixel_depth_to_robot(u: float, v: float, camera,
+                         cal: Optional[CalibrationData] = None):
+    """
+    3D 模式便捷函数: 彩色图像素 (u,v) + 深度相机 -> 机械臂基座 3D (x,y,z)。
+    供 demo/agent 调用: 抳取前把检测到的像素转成真实三维抓取点。
+
+    Returns:
+        (x, y, z) mm 或 None (无深度/无内参/未 3D 标定)
+    """
+    if cal is None:
+        cal = CalibrationData.load()
+    if cal.mode != "3d" or not hasattr(camera, "pixel_depth_to_camera_3d"):
+        return None
+    depth = camera.latest_depth() if hasattr(camera, "latest_depth") else None
+    if depth is None:
+        return None
+    # 彩色像素 -> 深度像素 (按分辨率比例)
+    frame = camera.read_color() if hasattr(camera, "read_color") else None
+    if frame is not None:
+        ch, cw = frame.shape[:2]
+        dh, dw = depth.shape[:2]
+        du = u * dw / cw
+        dv = v * dh / ch
+    else:
+        du, dv = u, v
+    cam3d = camera.pixel_depth_to_camera_3d(du, dv)
+    if cam3d is None:
+        return None
+    return cal.camera_to_robot(*cam3d)
 
 
 # ─── 主入口 ──────────────────────────────────────────────────
@@ -598,6 +735,8 @@ def main():
                         help='安全过渡高度 mm, 默认 280')
     parser.add_argument('--direct', action='store_true',
                         help='直接移动: 点间直接到目标不抬过渡高度 (忽略 --safe-z)')
+    parser.add_argument('--3d', dest='use_3d', action='store_true',
+                        help='3D 手眼标定 (需深度相机): 像素+深度反投影成相机系 3D, 解 4x4 刚体变换, 能抳不同高度物体')
     args = parser.parse_args()
 
     # 解析工作区参数
@@ -642,10 +781,15 @@ def main():
                 points = generate_grid_points(center, size, args.calib_z, args.grid)
             print(f"工作区: 中心={center} 尺寸={size} 高度={args.calib_z}mm 网格={args.grid}x{args.grid}")
             detector = ColorBlockDetector() if ColorBlockDetector else None
+            cal_mode = "3d" if args.use_3d else "2d"
+            if cal_mode == "3d" and not hasattr(camera, "pixel_depth_to_camera_3d"):
+                print("⚠️  --3d 需要深度相机 (Gemini 335), 当前相机不支持, 回退 2D 模式")
+                cal_mode = "2d"
+            print(f"标定模式: {cal_mode.upper()}")
             cal = AutoCalibrator(robot, camera, points, detector,
                                  grab_z=args.grab_z, samples=args.samples,
                                  safe_z=args.safe_z, confirm=args.confirm,
-                                 direct_move=args.direct)
+                                 direct_move=args.direct, mode=cal_mode)
             cal.run()
         else:
             # 交互标定 (需要显示器 + 鼠标点击)

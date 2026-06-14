@@ -46,6 +46,8 @@ class OrbbecCamera:
         self._depth_mm: Optional[np.ndarray] = None     # 最新深度 (uint16, mm)
         self._depth_scale: float = 1.0                  # 深度值 -> mm 比例
         self._opened = False
+        self._depth_intr = None                          # 深度相机内参 (fx,fy,cx,cy)
+        self._color_intr = None                          # RGB 相机内参
 
     # ─── 启动 / 停止 ────────────────────────────────────────
 
@@ -92,6 +94,19 @@ class OrbbecCamera:
 
             pipe.start(cfg)
             self._pipe = pipe
+
+            # 读出出厂内参 (用于 3D 反投影 / 手眼标定)
+            try:
+                cam_param = pipe.get_camera_param()
+                di = cam_param.depth_intrinsic
+                self._depth_intr = {"fx": di.fx, "fy": di.fy, "cx": di.cx,
+                                    "cy": di.cy, "width": di.width, "height": di.height}
+                ci = cam_param.rgb_intrinsic
+                self._color_intr = {"fx": ci.fx, "fy": ci.fy, "cx": ci.cx,
+                                    "cy": ci.cy, "width": ci.width, "height": ci.height}
+                logger.info(f"depth intrinsic: {self._depth_intr}")
+            except Exception as e:
+                logger.warning(f"读取内参失败: {e}")
 
             logger.info(f"Gemini335 started: color {cprof.get_width()}x{cprof.get_height()} "
                         f"{cprof.get_format()}, depth {dprof.get_width()}x{dprof.get_height()} "
@@ -205,6 +220,41 @@ class OrbbecCamera:
             if not (0 <= x < w and 0 <= y < h):
                 return None
             return float(self._depth_mm[y, x]) * self._depth_scale
+
+    def get_depth_intrinsics(self) -> Optional[dict]:
+        """深度相机内参 {fx,fy,cx,cy,width,height}。"""
+        return dict(self._depth_intr) if self._depth_intr else None
+
+    def get_color_intrinsics(self) -> Optional[dict]:
+        """RGB 相机内参。"""
+        return dict(self._color_intr) if self._color_intr else None
+
+    def pixel_depth_to_camera_3d(self, u: float, v: float,
+                                 depth_mm: float = None) -> Optional[tuple]:
+        """
+        深度图像素 (u,v) + 深度 -> 相机坐标系 3D 点 (Xc,Yc,Zc), 单位 mm。
+        使用深度相机内参反投影: Xc=(u-cx)*Z/fx, Yc=(v-cy)*Z/fy, Zc=Z。
+
+        Args:
+            u, v: 深度图像素坐标
+            depth_mm: 该点深度(mm); None=自动查 depth_at
+        Returns:
+            (Xc, Yc, Zc) mm, 或 None (无内参/无深度)
+        """
+        if self._depth_intr is None:
+            return None
+        if depth_mm is None:
+            depth_mm = self.depth_at(int(round(u)), int(round(v)))
+        if depth_mm is None or depth_mm <= 0:
+            return None
+        fx = self._depth_intr["fx"]
+        fy = self._depth_intr["fy"]
+        cx = self._depth_intr["cx"]
+        cy = self._depth_intr["cy"]
+        Xc = (u - cx) * depth_mm / fx
+        Yc = (v - cy) * depth_mm / fy
+        Zc = float(depth_mm)
+        return (float(Xc), float(Yc), Zc)
 
     def read_depth_colormap(self) -> Tuple[bool, Optional[np.ndarray]]:
         """深度伪彩 (BGR, JET)。无效区 (0) 染黑, 中心点标 mm 读数。"""
