@@ -80,34 +80,35 @@ def test_hardware():
 
 
 def test_camera():
-    """相机测试"""
-    from vision.camera import Camera
+    """相机测试 (Gemini 335 / pyorbbecsdk v2, 回退 USB)"""
+    from vision.orbbec_camera import open_camera
 
     print("=" * 50)
     print("  相机测试")
     print("=" * 50)
 
-    cam = Camera(rgb_device=1, enable_depth=True)
-    cam.start()
+    cam, label = open_camera()
+    if cam is None:
+        print("❌ 未检测到相机")
+        return
+    print(f"📷 {label}")
 
-    color, depth = cam.read()
+    color = cam.read_color() if hasattr(cam, "read_color") else (cam.read()[1] if cam.read()[0] else None)
     if color is not None:
         print(f"✅ RGB: {color.shape}")
     else:
         print("❌ RGB 读取失败")
 
-    if depth is not None:
+    depth = cam.latest_depth() if hasattr(cam, "latest_depth") else None
+    if depth is not None and (depth > 0).any():
         print(f"✅ 深度: {depth.shape}, 范围 {depth[depth>0].min()}-{depth.max()} mm")
     else:
-        print("⚠️ 深度不可用")
+        print("⚠️ 深度不可用 (非 Gemini 335 或无有效深度)")
 
-    # 保存快照
-    rgb_path, depth_path = cam.save_snapshot("test_snapshot")
-    print(f"  RGB 保存: {rgb_path}")
-    if depth_path:
-        print(f"  深度保存: {depth_path}")
-
-    cam.stop()
+    if hasattr(cam, "stop"):
+        cam.stop()
+    elif hasattr(cam, "release"):
+        cam.release()
     print("\n✅ 相机测试完成！")
 
 

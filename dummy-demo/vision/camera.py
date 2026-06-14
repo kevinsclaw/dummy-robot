@@ -1,6 +1,11 @@
 """
-相机采集模块
-============
+相机采集模块 (旧版 / LEGACY)
+============================
+
+⚠️ 已弃用: 新代码请用 vision/orbbec_camera.py 的 OrbbecCamera + open_camera()
+   (pyorbbecsdk v2 / Gemini 335, RGB + 深度)。
+   本文件是早期为 OEM 深度相机写的 pyorbbecsdk v1 封装, 仅 calibrate.py 仍引用,
+   待手眼标定流程统一后移除。
 
 支持:
   1. USB 摄像头 (通过 OpenCV)

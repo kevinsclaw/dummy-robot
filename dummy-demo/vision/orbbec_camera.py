@@ -175,6 +175,11 @@ class OrbbecCamera:
                 return False, None
             return True, self._color_bgr.copy()
 
+    def read_color(self) -> Optional[np.ndarray]:
+        """只读最新彩色帧 (BGR)。与旧 vision.camera.Camera 接口兼容。"""
+        with self._lock:
+            return None if self._color_bgr is None else self._color_bgr.copy()
+
     def release(self):
         self.stop()
 
@@ -231,3 +236,32 @@ class OrbbecCamera:
         cv2.putText(vis, rng, (10, h - 12), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, (200, 255, 200), 1)
         return True, vis
+
+
+# ─── 统一相机初始化 ─────────────────────────────────────────
+
+def open_camera():
+    """
+    统一的相机获取入口: 优先 Gemini 335 (RGB + 深度, pyorbbecsdk v2),
+    取不到流则回退到 USB cv2.VideoCapture(0) (640x480 RGB)。
+
+    所有需要相机的入口 (web/app.py, strands_agent.run_demo, main.py)
+    都应通过此函数获取, 保证视觉链路统一到新相机方案。
+
+    Returns:
+        (camera, label) — camera 可能是 OrbbecCamera / cv2.VideoCapture / None
+    """
+    try:
+        cam = OrbbecCamera()
+        if cam.start():
+            return cam, "Gemini 335 (RGB + 深度, pyorbbecsdk v2)"
+        logger.warning("Gemini 335 未取到流, 回退 USB")
+    except Exception as e:
+        logger.warning(f"Orbbec 初始化失败 ({e}), 回退 USB")
+
+    usb = cv2.VideoCapture(0)
+    if usb.isOpened():
+        usb.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        usb.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        return usb, "USB 相机 (640x480 RGB)"
+    return None, "无相机"

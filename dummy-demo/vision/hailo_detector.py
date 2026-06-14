@@ -13,7 +13,7 @@ Hailo-8 物体检测器
     detector = HailoDetector(model_path="/data/hailo-rpi5-examples/resources/models/hailo8/yolov6n.hef")
     detector.start()
     
-    frame = camera.read_color()  # BGR numpy array
+    frame = camera.read_color()  # BGR numpy array (OrbbecCamera / Camera 均支持)
     objects = detector.detect(frame)
     # → [Detection(label="block", color="red", cx=320, cy=240, bbox=[...], confidence=0.85)]
 """

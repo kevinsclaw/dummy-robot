@@ -433,16 +433,13 @@ def run_demo(port: Optional[str] = None, mock: bool = False,
         robot.enable()
         print("✅ 机械臂已连接并使能")
     
-    # 初始化相机 (RGB, /dev/video0 on Pi5)
-    import cv2
-    camera = cv2.VideoCapture(0)
-    if camera.isOpened():
-        camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        print("📷 相机已连接 (640x480 RGB)")
+    # 初始化相机 — 统一走 open_camera (优先 Gemini 335 RGB+深度, 回退 USB)
+    from vision.orbbec_camera import open_camera
+    camera, cam_label = open_camera()
+    if camera is not None:
+        print(f"📷 相机已连接: {cam_label}")
     else:
         print("⚠️  相机未检测到，视觉功能不可用")
-        camera = None
 
     # 颜色方块检测器
     detector = None
