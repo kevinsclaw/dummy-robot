@@ -45,6 +45,7 @@ class OrbbecCamera:
         self._color_bgr: Optional[np.ndarray] = None   # 最新彩色 (BGR)
         self._depth_mm: Optional[np.ndarray] = None     # 最新深度 (uint16, mm)
         self._depth_scale: float = 1.0                  # 深度值 -> mm 比例
+        self._vis_depth_range = (250.0, 800.0)          # 伪彩固定量程 (mm), 避免逐帧拉伸闪烁
         self._opened = False
         self._depth_intr = None                          # 深度相机内参 (fx,fy,cx,cy)
         self._color_intr = None                          # RGB 相机内参
@@ -265,13 +266,14 @@ class OrbbecCamera:
         valid = d > 0
         if valid.sum() == 0:
             return True, np.zeros((*d.shape, 3), dtype=np.uint8)
-        # 归一化到有效深度范围
-        dmin = d[valid].min()
-        dmax = d[valid].max()
+        # 固定量程归一化 (mm): 避免逐帧 min/max 动态拉伸导致伪彩颜色狂闪。
+        # 默认覆盖标定/抓取工作区深度; 可通过 self._vis_depth_range 调整。
+        rmin, rmax = getattr(self, "_vis_depth_range", (250.0, 800.0))
+        d_mm = d.astype(np.float32) * scale
         norm = np.zeros(d.shape, dtype=np.uint8)
-        if dmax > dmin:
-            norm[valid] = ((d[valid].astype(np.float32) - dmin) /
-                           (dmax - dmin) * 255).astype(np.uint8)
+        clipped = np.clip(d_mm, rmin, rmax)
+        norm[valid] = ((clipped[valid] - rmin) /
+                       (rmax - rmin) * 255).astype(np.uint8)
         vis = cv2.applyColorMap(norm, cv2.COLORMAP_JET)
         vis[~valid] = (0, 0, 0)  # 无深度区域黑
         # 中心点 mm
@@ -282,7 +284,7 @@ class OrbbecCamera:
         txt = f"center {cz/1000:.2f}m" if cz > 0 else "center: --"
         cv2.putText(vis, txt, (10, 25), cv2.FONT_HERSHEY_SIMPLEX,
                     0.6, (255, 255, 255), 2)
-        rng = f"range {dmin*scale/1000:.2f}-{dmax*scale/1000:.2f}m"
+        rng = f"fixed {rmin/1000:.2f}-{rmax/1000:.2f}m"
         cv2.putText(vis, rng, (10, h - 12), cv2.FONT_HERSHEY_SIMPLEX,
                     0.5, (200, 255, 200), 1)
         return True, vis
