@@ -302,22 +302,66 @@ class DummySerial:
         current[joint_id] = angle
         return self.move_joints(current)
 
+    def _send_nowait(self, cmd: str):
+        """发命令不读响应、不清缓冲 — 用于流式插值, 让固件命令队列连续填充,
+        固件来不及减速到 0 就拿到下一个点, 从而平滑过渡 (实测 step2mm/gap0.03 丝滑)。"""
+        if not self.connected:
+            raise RuntimeError("未连接")
+        self._ser.write(f"{cmd}\n".encode())
+        self._ser.flush()
+
     def move_cartesian(self, x: float, y: float, z: float,
                        a: float = 0.0, b: float = 90.0, c: float = 0.0,
-                       wait: bool = True) -> bool:
+                       wait: bool = True,
+                       smooth: bool = True,
+                       step_mm: float = 2.0, gap: float = 0.03) -> bool:
         """
-        笛卡尔运动
+        笛卡尔运动 (默认流式插值, 丝滑)
+
+        从当前末端位姿到目标做笛卡尔直线插值, 分小步用 fire-and-forget 发 @,
+        固件队列连续填充实现平滑过渡 — 不再一步一停 (旧的同步等响应会顿挫)。
 
         Args:
             x, y, z: 位置 (mm)
             a, b, c: 姿态 (度)
+            wait: 末尾是否短暂等待落稳
+            smooth: True=流式插值 (推荐); False=旧的一次性发目标
+            step_mm: 插值步长 (mm), 越小越顺
+            gap: 每步间隔 (秒), 实测 0.03 丝滑且不溢出
         """
-        cmd = f"@{x:.2f},{y:.2f},{z:.2f},{a:.2f},{b:.2f},{c:.2f}"
-        resp = self._send(cmd)
+        if not smooth:
+            self._send(f"@{x:.2f},{y:.2f},{z:.2f},{a:.2f},{b:.2f},{c:.2f}")
+            if wait:
+                time.sleep(1.5)
+            return True
+
+        # 读当前位姿做起点; 读不到则退化为一次性发
+        try:
+            cur = self.get_cartesian_pose()
+            sx, sy, sz = float(cur[0]), float(cur[1]), float(cur[2])
+        except Exception:
+            self._send(f"@{x:.2f},{y:.2f},{z:.2f},{a:.2f},{b:.2f},{c:.2f}")
+            if wait:
+                time.sleep(1.5)
+            return True
+
+        dist = ((x - sx) ** 2 + (y - sy) ** 2 + (z - sz) ** 2) ** 0.5
+        n = max(1, int(dist / max(0.5, step_mm)))
+        for i in range(1, n + 1):
+            t = i / n
+            ix = sx + (x - sx) * t
+            iy = sy + (y - sy) * t
+            iz = sz + (z - sz) * t
+            self._send_nowait(f"@{ix:.2f},{iy:.2f},{iz:.2f},{a:.2f},{b:.2f},{c:.2f}")
+            time.sleep(gap)
 
         if wait:
-            time.sleep(1.5)  # 笛卡尔运动等待
-
+            time.sleep(0.8)  # 末段落稳
+        # 流式期间未读响应, 清掉固件回的 ok 残留, 避免污染下条同步命令
+        try:
+            self._ser.reset_input_buffer()
+        except Exception:
+            pass
         return True
 
     # ─── 夹爪控制 (通过 J6 机械联动) ────────────────────────
