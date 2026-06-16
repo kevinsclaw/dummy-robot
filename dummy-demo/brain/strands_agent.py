@@ -60,6 +60,13 @@ SYSTEM_PROMPT = """你是 Dummy V2 机械臂的智能控制器。
 ## 颜色方块 Demo
 工作台上有彩色方块 (约 25mm 边长)。
 常见任务: 按颜色分拣、堆叠、放到指定位置。
+
+## 抓取首选 grab_block (重要)
+- 抓取某颜色方块时, **优先用一体化工具 grab_block(color)**, 它已封装好完整 3D 手眼标定抓取流程
+  (多帧检测 -> 深度反投影 -> 3D 标定算 XYZ -> 悬停 -> 下降 -> 闭爪 -> 抬起), 并带好调优补偿 (dx=10, dz=-15)。
+- grab_block 一步到位, 不需再手动 detect_objects + move_to + close_gripper 拼接。
+- 只有在 grab_block 不适用 (非方块/特殊位姿/需精细控制) 时, 才用 detect_objects + move_to 等原子工具手动编排。
+- 抱另位置偏差, 可调 grab_block 的 dx/dy/dz 补偿; 标定文件变了可传 calib_path。
 """
 
 # ─── Strands Tool Functions ──────────────────────────────────
@@ -364,9 +371,131 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None, hail
             "scene": stats,
         })
 
+    @tool
+    def grab_block(color: str = "yellow", dx: float = 10.0, dy: float = 0.0,
+                   dz: float = -15.0, calib_path: str = None,
+                   speed: int = 25) -> str:
+        """
+        一体化抓取指定颜色的方块 (3D 手眼标定链路, 等价于 _grab_full_3d.py)。
+        自动完成: 多帧检测 -> 深度反投影 -> 3D 标定算出机械臂 XYZ
+        -> 悬停 -> 下降 -> 闭爪 -> 抬起。复用 web app 已开的相机/机械臂。
+
+        Args:
+            color: 目标颜色方块, 默认 "yellow"
+            dx: X 补偿 mm (机械臂坐标系), 默认 10 (标定调优值)
+            dy: Y 补偿 mm, 默认 0
+            dz: Z 补偿 mm, 默认 -15 (落点比 3D 算出的 Z 低 15mm)
+            calib_path: 可选, 指定标定文件路径; 不传则用启动时加载的标定
+            speed: 运动速度, 默认 25 (慢速安全)
+
+        Returns:
+            抓取结果 (检测坐标 / 补偿后落点 / 状态)
+        """
+        import numpy as _np
+        APPROACH_DZ = 40.0
+        LIFT_DZ = 50.0
+        POSE = (0.0, 90.0, 0.0)
+
+        if not camera:
+            return json.dumps({"error": "视觉系统不可用 (相机缺失)"})
+
+        # 标定: 可选覆盖。优先用 calib_path 指定的文件, 否则用传入的 calibration
+        cal = calibration
+        if calib_path:
+            try:
+                from calibrate import CalibrationData
+                cal = CalibrationData.load(calib_path)
+            except Exception as e:
+                return json.dumps({"error": f"加载标定 {calib_path} 失败: {e}"})
+        if cal is None or getattr(cal, "mode", None) != "3d":
+            return json.dumps({"error": "需要 3D 标定 (calibration mode=3d)"})
+        if not hasattr(camera, "pixel_depth_to_camera_3d"):
+            return json.dumps({"error": "相机不支持深度反投影 (需 Gemini 335)"})
+
+        def _sample_depth(du, dv, half=3, frames=6):
+            vals = []
+            for _ in range(frames):
+                depth = camera.latest_depth() if hasattr(camera, "latest_depth") else None
+                if depth is None:
+                    time.sleep(0.05); continue
+                dh, dw = depth.shape[:2]
+                iu, iv = int(round(du)), int(round(dv))
+                scale = getattr(camera, "_depth_scale", 1.0) or 1.0
+                y0, y1 = max(0, iv - half), min(dh, iv + half + 1)
+                x0, x1 = max(0, iu - half), min(dw, iu + half + 1)
+                patch = depth[y0:y1, x0:x1].astype(_np.float32) * scale
+                valid = patch[(patch > 50) & (patch < 2000)]
+                if valid.size >= 5:
+                    vals.append(float(_np.median(valid)))
+                time.sleep(0.04)
+            return float(_np.median(vals)) if vals else None
+
+        # 多帧检测目标色, 反投影 + 3D 标定算机械臂坐标
+        samples = []
+        for _ in range(8):
+            frame = camera.read_color() if hasattr(camera, "read_color") else None
+            if frame is None:
+                time.sleep(0.15); continue
+            if not detector:
+                return json.dumps({"error": "颜色检测器不可用"})
+            blocks = [b for b in detector.detect(frame) if b.color == color]
+            if not blocks:
+                time.sleep(0.15); continue
+            blocks.sort(key=lambda b: getattr(b, "area_px", 0), reverse=True)
+            b = blocks[0]
+            depth = camera.latest_depth() if hasattr(camera, "latest_depth") else None
+            if depth is None:
+                time.sleep(0.15); continue
+            ch, cw = frame.shape[:2]; dh, dw = depth.shape[:2]
+            du = b.cx * dw / cw; dv = b.cy * dh / ch
+            depth_mm = _sample_depth(du, dv)
+            if depth_mm is None:
+                time.sleep(0.15); continue
+            c3d = camera.pixel_depth_to_camera_3d(du, dv, depth_mm=depth_mm)
+            if c3d is None:
+                time.sleep(0.15); continue
+            rx, ry, rz = cal.camera_to_robot(*c3d)
+            samples.append((rx, ry, rz))
+            time.sleep(0.1)
+
+        if len(samples) < 3:
+            return json.dumps({"error": f"检测不稳, 样本不足 ({len(samples)})",
+                               "color": color})
+
+        arr = _np.array(samples)
+        x, y, z = _np.median(arr, axis=0)
+        det_xyz = [round(float(x), 1), round(float(y), 1), round(float(z), 1)]
+        x += dx; y += dy; z += dz
+
+        # 安全范围 (3D 标定有效盒子放宽)
+        if not (150 <= x <= 260 and -55 <= y <= 55 and 220 <= z <= 300):
+            return json.dumps({"error": "补偿后超出 3D 安全范围 (X150-260 Y±55 Z220-300)",
+                               "detected": det_xyz,
+                               "target": [round(x, 1), round(y, 1), round(z, 1)]})
+
+        approach_z = z + APPROACH_DZ
+        safe_z = max(approach_z, 315.0)
+        robot.set_speed(speed)
+        robot.open_gripper(); time.sleep(0.5)
+        robot.move_cartesian(x, y, safe_z, *POSE)
+        robot.move_cartesian(x, y, approach_z, *POSE)
+        robot.move_cartesian(x, y, z, *POSE)
+        robot.close_gripper(); time.sleep(1.5)
+        robot.move_cartesian(x, y, z + LIFT_DZ, *POSE)
+
+        return json.dumps({
+            "status": "ok",
+            "color": color,
+            "detected_mm": det_xyz,
+            "compensation": {"dx": dx, "dy": dy, "dz": dz},
+            "grab_target_mm": [round(x, 1), round(y, 1), round(z, 1)],
+            "calibration": calib_path or "default(loaded)",
+            "note": "夹爪保持闭合, 物体应已抬起",
+        })
+
     return [detect_objects, move_to, open_gripper, close_gripper, 
             home, get_current_position, move_joints, set_gripper_position,
-            measure_depth]
+            measure_depth, grab_block]
 
 
 # ─── Agent Setup ─────────────────────────────────────────────
