@@ -165,15 +165,31 @@ class DummySerial:
     # ─── 基础控制 ────────────────────────────────────────────
 
     def home(self) -> bool:
-        """回零位 (机械臂展开到 HOME)"""
-        resp = self._send("!HOME")
-        if "ok" in resp.lower() or "started" in resp.lower():
-            logger.info("HOME 成功")
-            self._joints = HOME_JOINTS.copy()
-            self._gripper_angle = 0.0
-            time.sleep(3)  # 等回零完成
-            return True
-        logger.error(f"HOME 失败: {resp}")
+        """回零位 (机械臂展开到 HOME)。
+        发 !HOME; 若未读到响应, 重试一次, 再回读关节角确认是否已到 HOME,
+        避免标定收尾等时序紧张时把成功的 HOME 误报为失败。"""
+        for attempt in range(2):
+            resp = self._send("!HOME", timeout=3.0)
+            if "ok" in resp.lower() or "started" in resp.lower():
+                logger.info("HOME 成功")
+                self._joints = HOME_JOINTS.copy()
+                self._gripper_angle = 0.0
+                time.sleep(3)  # 等回零完成
+                return True
+            logger.warning(f"HOME 响应异常 (尝试 {attempt+1}/2): {resp!r}, 回读确认...")
+            time.sleep(3)  # 即便没读到响应, 机械臂可能已在执行, 给足时间
+            # 回读关节角, 若已接近 HOME 则判定成功
+            try:
+                jpos = self.get_joint_positions()
+                if jpos and len(jpos) >= 3 and all(
+                        abs(jpos[i] - HOME_JOINTS[i]) < 3.0 for i in range(min(len(jpos), len(HOME_JOINTS)))):
+                    logger.info(f"HOME 成功 (回读确认 JPOS={jpos})")
+                    self._joints = HOME_JOINTS.copy()
+                    self._gripper_angle = 0.0
+                    return True
+            except Exception as e:
+                logger.warning(f"HOME 回读失败: {e}")
+        logger.error("HOME 失败: 多次重试 + 回读均未确认到位")
         return False
 
     def enable(self) -> bool:
