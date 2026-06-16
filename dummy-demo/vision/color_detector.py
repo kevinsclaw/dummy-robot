@@ -48,10 +48,11 @@ class Block:
 # 建议用 color_tuner() 在现场标定
 
 DEFAULT_COLOR_RANGES = {
-    "red": [
-        ((0, 120, 80), (8, 255, 255)),
-        ((172, 120, 80), (180, 255, 255)),
-    ],
+    # red 禁用: 机械臂本身是红色, 会持续误检
+    # "red": [
+    #     ((0, 120, 80), (8, 255, 255)),
+    #     ((172, 120, 80), (180, 255, 255)),
+    # ],
     "blue": [
         ((100, 120, 60), (130, 255, 255)),
     ],
@@ -59,7 +60,7 @@ DEFAULT_COLOR_RANGES = {
         ((40, 80, 60), (80, 255, 255)),
     ],
     "yellow": [
-        ((22, 120, 100), (35, 255, 255)),
+        ((22, 30, 100), (35, 255, 255)),
     ],
     "orange": [
         ((8, 150, 100), (22, 255, 255)),
@@ -87,7 +88,7 @@ class ColorBlockDetector:
     def __init__(
         self,
         color_ranges: dict = None,
-        min_area: int = 500,
+        min_area: int = 100,
         max_area: int = 50000,
         camera_height_mm: float = 300.0,
         fov_h_deg: float = 60.0,
