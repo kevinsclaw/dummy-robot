@@ -67,6 +67,7 @@ SYSTEM_PROMPT = """你是 Dummy V2 机械臂的智能控制器。
 - grab_block 一步到位, 不需再手动 detect_objects + move_to + close_gripper 拼接。
 - 只有在 grab_block 不适用 (非方块/特殊位姿/需精细控制) 时, 才用 detect_objects + move_to 等原子工具手动编排。
 - 抱另位置偏差, 可调 grab_block 的 dx/dy/dz 补偿; 标定文件变了可传 calib_path。
+- **若 grab_block 返回 status="refused" (坐标超出安全工作区), 不要重试。把 returned 的 reason 用中文清楚告诉用户为什么不执行 (哪个轴、超了多少、范围是多少), 并建议把物体挪到画面中央有效标定区。**
 """
 
 # ─── Strands Tool Functions ──────────────────────────────────
@@ -467,11 +468,31 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None, hail
         det_xyz = [round(float(x), 1), round(float(y), 1), round(float(z), 1)]
         x += dx; y += dy; z += dz
 
-        # 安全范围 (3D 标定有效盒子放宽)
-        if not (150 <= x <= 260 and -55 <= y <= 55 and 220 <= z <= 300):
-            return json.dumps({"error": "补偿后超出 3D 安全范围 (X150-260 Y±55 Z220-300)",
-                               "detected": det_xyz,
-                               "target": [round(x, 1), round(y, 1), round(z, 1)]})
+        # 安全范围检查 (3D 标定有效盒子): 超出则拒绝执行, 返回清楚原因
+        X_MIN, X_MAX = 150, 260
+        Y_MIN, Y_MAX = -55, 55
+        Z_MIN, Z_MAX = 220, 300
+        violations = []
+        if not (X_MIN <= x <= X_MAX):
+            violations.append(f"X={x:.0f}mm 超出 [{X_MIN},{X_MAX}] (" +
+                              ("太远/超前" if x > X_MAX else "太近/超后") + ")")
+        if not (Y_MIN <= y <= Y_MAX):
+            violations.append(f"Y={y:.0f}mm 超出 [{Y_MIN},{Y_MAX}] (" +
+                              ("偏左过多" if y > Y_MAX else "偏右过多") + ")")
+        if not (Z_MIN <= z <= Z_MAX):
+            violations.append(f"Z={z:.0f}mm 超出 [{Z_MIN},{Z_MAX}] (" +
+                              ("太高" if z > Z_MAX else "太低/会撞桌") + ")")
+        if violations:
+            reason = "; ".join(violations)
+            return json.dumps({
+                "status": "refused",
+                "error": f"拒绝执行: 目标坐标不在安全工作区内。{reason}。",
+                "reason": reason,
+                "safe_range": {"X": [X_MIN, X_MAX], "Y": [Y_MIN, Y_MAX], "Z": [Z_MIN, Z_MAX]},
+                "detected_mm": det_xyz,
+                "target_mm": [round(x, 1), round(y, 1), round(z, 1)],
+                "hint": "物体可能不在标定有效区 (画面中央), 或补偿 dx/dy/dz 过大。未做任何动作。",
+            }, ensure_ascii=False)
 
         approach_z = z + APPROACH_DZ
         safe_z = max(approach_z, 315.0)
