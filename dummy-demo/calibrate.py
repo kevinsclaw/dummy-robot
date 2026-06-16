@@ -144,15 +144,33 @@ def generate_grid_points_multilayer(center, size, z_layers, grid=3, pose=DEFAULT
         grid: 每层每边点数 (每层点数 = grid*grid)
         pose: (a, b, c) 末端姿态
     Returns:
-        List[(x, y, z, a, b, c)], 按 (层 → 层内距中心远近) 排序
+        List[(x, y, z, a, b, c)], 全局最近邻连续排序 (相邻两点空间距离最小, 跨层也平滑)
     """
     cx, cy = center
     layers = sorted(set(z_layers))  # 去重并从低到高, 避免重复层
-    all_points = []
+    raw = []
     for z in layers:
-        layer_pts = generate_grid_points(center, size, z, grid=grid, pose=pose)
-        all_points.extend(layer_pts)
-    return all_points
+        # 每层用原始网格 (不在层内预排序, 交给全局排序)
+        for p in generate_grid_points(center, size, z, grid=grid, pose=pose):
+            raw.append(p)
+    if not raw:
+        return []
+    # 贪心最近邻串联: 从最靠近工作区中心(且最低层)的点起步,
+    # 每次走到离当前点欧氏距离(含 Z)最近的下一点。
+    # 这样相邻两点始终空间最近, 机械臂移动平滑不猛。
+    def d2(a, b):
+        return (a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2
+    remaining = list(raw)
+    # 起点: 距(cx,cy)水平最近 且 Z 最低
+    start = min(remaining, key=lambda p: ((p[0]-cx)**2 + (p[1]-cy)**2, p[2]))
+    ordered = [start]
+    remaining.remove(start)
+    while remaining:
+        last = ordered[-1]
+        nxt = min(remaining, key=lambda p: d2(p, last))
+        ordered.append(nxt)
+        remaining.remove(nxt)
+    return ordered
 
 
 def detect_red_marker(frame, detector=None):
@@ -482,22 +500,44 @@ class AutoCalibrator:
 
     def _pixel_to_cam3d(self, u, v):
         """彩色图像素 (u,v) -> 相机系 3D 点 (mm)。
-        像素在彩色图分辨率, 需按比例映射到深度图再查深度+反投影。"""
+        像素在彩色图分辨率, 需按比例映射到深度图再查深度+反投影。
+        深度用 窗口+多帧 中值降噪 (单像素深度噪声大, 会让 Xc/Zc 跳变)。"""
         cam = self.camera
         if not hasattr(cam, "pixel_depth_to_camera_3d"):
             return None
-        depth = cam.latest_depth() if hasattr(cam, "latest_depth") else None
-        if depth is None:
-            return None
-        # 彩色帧分辨率
         frame = self._read_frame()
         if frame is None:
             return None
         ch, cw = frame.shape[:2]
-        dh, dw = depth.shape[:2]
-        du = u * dw / cw
-        dv = v * dh / ch
-        return cam.pixel_depth_to_camera_3d(du, dv)
+        # 多帧 + 7x7 窗口 采集深度, 去 0/异常, 取中值
+        half = 3  # 7x7
+        depth_samples = []
+        du = dv = None
+        for _ in range(max(5, getattr(self, 'samples', 5))):
+            depth = cam.latest_depth() if hasattr(cam, "latest_depth") else None
+            if depth is None:
+                time.sleep(0.05)
+                continue
+            dh, dw = depth.shape[:2]
+            du = u * dw / cw
+            dv = v * dh / ch
+            iu, iv = int(round(du)), int(round(dv))
+            scale = getattr(cam, "_depth_scale", 1.0) or 1.0
+            y0, y1 = max(0, iv - half), min(dh, iv + half + 1)
+            x0, x1 = max(0, iu - half), min(dw, iu + half + 1)
+            patch = depth[y0:y1, x0:x1].astype(np.float32) * scale
+            valid = patch[(patch > 50) & (patch < 2000)]  # 有效深度范围 mm
+            if valid.size >= 5:
+                depth_samples.append(float(np.median(valid)))
+            time.sleep(0.04)
+        if not depth_samples or du is None:
+            return None
+        # 跨帧再取中值, 报告离散度
+        depth_mm = float(np.median(depth_samples))
+        spread = float(np.max(depth_samples) - np.min(depth_samples)) if len(depth_samples) > 1 else 0.0
+        if spread > 40:
+            print(f"    ⚠ 深度不稳 (spread {spread:.0f}mm, n={len(depth_samples)}), 取中值 {depth_mm:.0f}mm")
+        return cam.pixel_depth_to_camera_3d(du, dv, depth_mm=depth_mm)
 
 
     def _read_frame(self):
@@ -764,6 +804,8 @@ def main():
                         help='安全过渡高度 mm, 默认 280')
     parser.add_argument('--direct', action='store_true',
                         help='直接移动: 点间直接到目标不抬过渡高度 (忽略 --safe-z)')
+    parser.add_argument('--settle', type=float, default=1.5,
+                        help='移动后稳定等待秒数 (抓帧前), 默认 1.5; --direct/大跨度移动建议 2.5')
     parser.add_argument('--3d', dest='use_3d', action='store_true',
                         help='3D 手眼标定 (需深度相机): 像素+深度反投影成相机系 3D, 解 4x4 刚体变换, 能抳不同高度物体')
     args = parser.parse_args()
@@ -829,7 +871,8 @@ def main():
             cal = AutoCalibrator(robot, camera, points, detector,
                                  grab_z=args.grab_z, samples=args.samples,
                                  safe_z=args.safe_z, confirm=args.confirm,
-                                 direct_move=args.direct, mode=cal_mode)
+                                 direct_move=args.direct, mode=cal_mode,
+                                 settle=args.settle)
             cal.run()
         else:
             # 交互标定 (需要显示器 + 鼠标点击)
@@ -850,7 +893,20 @@ def main():
             camera.stop()
         elif hasattr(camera, 'release'):
             camera.release()
-        robot.disconnect()
+        # 标定结束: 回到 HOME 位置, 且保持使能 (不 disable)
+        try:
+            if robot.connected:
+                print("标定结束, 回到 HOME 位置 (保持使能)...")
+                robot.home()
+        except Exception as e:
+            print(f"回 HOME 失败: {e}")
+        # 只关闭串口句柄, 不调 disconnect()->disable(), 保持机械臂使能
+        try:
+            if getattr(robot, '_ser', None):
+                robot._ser.close()
+                robot._ser = None
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':
