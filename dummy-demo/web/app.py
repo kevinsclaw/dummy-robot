@@ -318,27 +318,37 @@ async def websocket_endpoint(ws: WebSocket):
                     
             elif msg.get("type") == "home":
                 await ws.send_json({"type": "thinking", "text": "🏠 开机流程: HOME → ENABLE"})
-                await asyncio.to_thread(robot.home)
+                home_ok = await asyncio.to_thread(robot.home)
                 await asyncio.to_thread(time.sleep, 3)
-                await asyncio.to_thread(robot.enable)
-                await ws.send_json({"type": "response", "text": "✅ 开机完成！机械臂已展开并使能。"})
+                en_ok = await asyncio.to_thread(robot.enable)
+                if home_ok and en_ok:
+                    await ws.send_json({"type": "response", "text": "✅ 开机完成！机械臂已展开并使能。"})
+                else:
+                    fail = "HOME" if not home_ok else "使能"
+                    await ws.send_json({"type": "response", "text": f"❌ 开机失败: {fail} 未成功, 请检查串口/机械臂状态。"})
 
             elif msg.get("type") == "rehome":
                 await ws.send_json({"type": "thinking", "text": "🔄 复位: HOME"})
                 await asyncio.to_thread(robot.set_speed, 15)
-                await asyncio.to_thread(robot.home)
+                home_ok = await asyncio.to_thread(robot.home)
                 await asyncio.to_thread(time.sleep, 4)
                 await asyncio.to_thread(robot.set_speed, 20)
-                await ws.send_json({"type": "response", "text": "✅ 已复位到 HOME"})
+                if home_ok:
+                    await ws.send_json({"type": "response", "text": "✅ 已复位到 HOME"})
+                else:
+                    await ws.send_json({"type": "response", "text": "❌ 复位失败: HOME 未成功, 请检查串口/机械臂状态。"})
                 
                 
             elif msg.get("type") == "reset":
                 await ws.send_json({"type": "thinking", "text": "📦 关机流程: RESET (折叠) → DISABLE (失能)"})
                 # RESET = 折叠收纳 (J1=0, J2=-73, J3=180, J4=0, J5=0, J6=0) — 与固件 REST_POSE 一致
-                await asyncio.to_thread(robot.move_joints, [0, -73, 180, 0, 0, 0])
+                move_ok = await asyncio.to_thread(robot.move_joints, [0, -73, 180, 0, 0, 0])
                 await asyncio.to_thread(time.sleep, 5)  # 等到位
                 await asyncio.to_thread(robot.disable)
-                await ws.send_json({"type": "response", "text": "✅ 关机完成！机械臂已折叠收纳并失能。\n现在可以安全断电。"})
+                if move_ok:
+                    await ws.send_json({"type": "response", "text": "✅ 关机完成！机械臂已折叠收纳并失能。\n现在可以安全断电。"})
+                else:
+                    await ws.send_json({"type": "response", "text": "⚠️ 折叠动作未确认成功, 但已执行失能。请目测机械臂姿态后再断电。"})
                 
                 
             elif msg.get("type") == "estop":
@@ -373,7 +383,8 @@ def main():
         if not robot.connect():
             print("❌ 串口连接失败！")
             sys.exit(1)
-        robot.home()
+        if not robot.home():
+            print("⚠️  启动 HOME 未确认成功 (请检查机械臂位置)")
         time.sleep(3)
         robot.enable()
         print(f"✅ 机械臂已连接: {args.port}")
