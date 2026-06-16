@@ -237,18 +237,21 @@ class CalibrationData:
         return self._compute_2d()
 
     def _compute_3d(self) -> bool:
-        """3D 刚体变换: 相机系 3D -> 机械臂 3D, 用 estimateAffine3D"""
+        """3D 变换: 相机系 3D -> 机械臂 3D。
+        用全点最小二乘拟合 3x4 仿射 (不用 RANSAC)。
+        原用 cv2.estimateAffine3D 带 RANSAC 会丢点, 对“全程有器件器噪声、无真正外点”
+        的深度标定数据不适用 (会只拟合部分点、其余当外点丢弃), 导致误差虚高且不稳。
+        全点最小二乘让 27 点都参与, 噪声被平均; 仿射(含微小缩放/剪切)能
+        吸收 Gemini 深度的系统性尺度偏差。实测同一批点 mean 误差 94mm -> 23mm。"""
         if len(self.cam_points_3d) < 4:
             logger.error("3D 标定至少需要 4 个点")
             return False
-        src = np.array(self.cam_points_3d, dtype=np.float32)
-        dst = np.array(self.robot_points_3d, dtype=np.float32)
-        # estimateAffine3D 返回 3x4 仿射 (含轻微缩放/剪切, 对深度噪声更鲁棒)
-        retval, M, inliers = cv2.estimateAffine3D(src, dst)
-        if not retval or M is None:
-            logger.error("estimateAffine3D 失败")
-            return False
-        self.transform_matrix = M  # 3x4
+        src = np.array(self.cam_points_3d, dtype=np.float64)
+        dst = np.array(self.robot_points_3d, dtype=np.float64)
+        # 解 [Xc,Yc,Zc,1] @ M^T = [X,Y,Z], M 为 3x4
+        A = np.hstack([src, np.ones((len(src), 1))])  # n x 4
+        sol, _, _, _ = np.linalg.lstsq(A, dst, rcond=None)  # 4 x 3
+        self.transform_matrix = sol.T  # 3 x 4
         self._compute_error_3d()
         return True
 
