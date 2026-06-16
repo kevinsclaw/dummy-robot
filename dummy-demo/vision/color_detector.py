@@ -88,7 +88,7 @@ class ColorBlockDetector:
     def __init__(
         self,
         color_ranges: dict = None,
-        min_area: int = 100,
+        min_area: int = 500,
         max_area: int = 50000,
         camera_height_mm: float = 300.0,
         fov_h_deg: float = 60.0,
