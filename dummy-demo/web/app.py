@@ -460,8 +460,14 @@ def main():
         print("⚠️  Hailo SDK 未安装，视频流不叠加检测")
         hailo_detector = None
 
-    # 手眼标定 (TODO: 标定完成后加载参数)
+    # 手眼标定: 加载 calibration.json (3D 标定, 闭环误差 ~17mm)
     calibration = None
+    try:
+        from calibrate import CalibrationData
+        calibration = CalibrationData.load()
+        print(f"📏 标定已加载: mode={calibration.mode} 误差={calibration.error_mm:.1f}mm")
+    except Exception as e:
+        print(f"⚠️  标定未加载 ({e}); 物体世界坐标将为 0, 无法抓取")
 
     # Initialize tools
     agent_tools = create_agent_tools(robot, camera, detector, calibration, hailo_detector)

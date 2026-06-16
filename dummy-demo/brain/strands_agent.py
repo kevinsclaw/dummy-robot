@@ -131,14 +131,37 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None, hail
                 return round(float(z), 1)
             except Exception:
                 return None
+
+        # 像素 -> 机械臂 3D 世界坐标 (mm): 走已验证过的17mm 3D 标定链路
+        # (深度反投影 -> camera_to_robot 仿射变换)。不再用 detector 自带的旧 2D 平面公式。
+        def _pixel_to_robot_3d(px, py):
+            if calibration is None or getattr(calibration, "mode", None) != "3d":
+                return None
+            if not hasattr(camera, "pixel_depth_to_camera_3d"):
+                return None
+            try:
+                draw = camera.latest_depth() if hasattr(camera, "latest_depth") else None
+                if draw is None:
+                    return None
+                ch, cw = frame.shape[:2]
+                dh, dw = draw.shape[:2]
+                du = px * dw / cw
+                dv = py * dh / ch
+                cam3d = camera.pixel_depth_to_camera_3d(du, dv)
+                if cam3d is None:
+                    return None
+                return calibration.camera_to_robot(*cam3d)
+            except Exception:
+                return None
         
         # 1. Hailo YOLO 检测 (通用物体)
         if hailo and hailo._started:
             try:
                 yolo_objects = hailo.detect(frame)
                 for obj in yolo_objects:
-                    if calibration:
-                        wx, wy, wz = calibration.pixel_to_world(obj.cx, obj.cy)
+                    r3d = _pixel_to_robot_3d(obj.cx, obj.cy)
+                    if r3d is not None:
+                        wx, wy, wz = r3d
                     else:
                         wx, wy, wz = 0, 0, 0
                     results.append({
@@ -159,10 +182,9 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None, hail
             try:
                 color_objects = detector.detect(frame)
                 for obj in color_objects:
-                    if hasattr(obj, 'world_x'):
-                        wx, wy, wz = obj.world_x, obj.world_y, obj.world_z
-                    elif calibration:
-                        wx, wy, wz = calibration.pixel_to_world(obj.cx, obj.cy)
+                    r3d = _pixel_to_robot_3d(obj.cx, obj.cy)
+                    if r3d is not None:
+                        wx, wy, wz = r3d
                     else:
                         wx, wy, wz = 0, 0, 0
                     results.append({
@@ -451,8 +473,14 @@ def run_demo(port: Optional[str] = None, mock: bool = False,
         except ImportError:
             print("⚠️  颜色检测器不可用")
 
-    # 手眼标定 (TODO: 标定完成后加载参数)
+    # 手眼标定: 加载 calibration.json (3D 标定, 闭环误差 ~17mm)
     calibration = None
+    try:
+        from calibrate import CalibrationData
+        calibration = CalibrationData.load()
+        print(f"📏 标定已加载: mode={calibration.mode} 误差={calibration.error_mm:.1f}mm")
+    except Exception as e:
+        print(f"⚠️  标定未加载 ({e}); 物体世界坐标将为 0, 无法抓取")
     
     agent = create_dummy_agent(robot, camera, detector, calibration,
                                model_id=model_id, provider=provider)
