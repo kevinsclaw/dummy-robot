@@ -6,6 +6,12 @@ __pycache__/
 vm.zip
 *.jpg
 *.png
+
+# Temporary/scratch debug scripts (prefixed with underscore) — not part of the codebase
+_*.py
+# Calibration outputs are machine-specific, keep them local
+calibration_*.json
+_calib_now.json
 # See https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files for more about ignoring files.
 
 # compiled output
