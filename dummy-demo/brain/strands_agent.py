@@ -63,7 +63,7 @@ SYSTEM_PROMPT = """你是 Dummy V2 机械臂的智能控制器。
 
 ## 抓取首选 grab_block (重要)
 - 抓取某颜色方块时, **优先用一体化工具 grab_block(color)**, 它已封装好完整 3D 手眼标定抓取流程
-  (多帧检测 -> 深度反投影 -> 3D 标定算 XYZ -> 悬停 -> 下降 -> 闭爪 -> 抬起), 默认不加补偿 (dx=0, dy=0, dz=0), 直接用 3D 标定算出的坐标。
+  (多帧检测 -> 深度反投影 -> 3D 标定算 XYZ -> 悬停 -> 下降 -> 闭爪 -> 抬起), 并带好调优补偿 (dx=15, dz=-15)。
 - grab_block 一步到位, 不需再手动 detect_objects + move_to + close_gripper 拼接。
 - 只有在 grab_block 不适用 (非方块/特殊位姿/需精细控制) 时, 才用 detect_objects + move_to 等原子工具手动编排。
 - 抱另位置偏差, 可调 grab_block 的 dx/dy/dz 补偿; 标定文件变了可传 calib_path。
@@ -373,8 +373,8 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None, hail
         })
 
     @tool
-    def grab_block(color: str = "yellow", dx: float = 0.0, dy: float = 0.0,
-                   dz: float = 0.0, calib_path: str = None,
+    def grab_block(color: str = "yellow", dx: float = 15.0, dy: float = 0.0,
+                   dz: float = -15.0, calib_path: str = None,
                    speed: int = 25) -> str:
         """
         一体化抓取指定颜色的方块 (3D 手眼标定链路, 等价于 _grab_full_3d.py)。
@@ -383,9 +383,9 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None, hail
 
         Args:
             color: 目标颜色方块, 默认 "yellow"
-            dx: X 补偿 mm (机械臂坐标系), 默认 0 (无补偿)
+            dx: X 补偿 mm (机械臂坐标系), 默认 15 (标定调优值)
             dy: Y 补偿 mm, 默认 0
-            dz: Z 补偿 mm, 默认 0 (落点用 3D 算出的 Z, 无补偿)
+            dz: Z 补偿 mm, 默认 -15 (落点比 3D 算出的 Z 低 15mm)
             calib_path: 可选, 指定标定文件路径; 不传则用启动时加载的标定
             speed: 运动速度, 默认 25 (慢速安全)
 
