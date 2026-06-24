@@ -92,8 +92,19 @@ DEFAULT_GRID = 3
 DEFAULT_POSE = (0.0, 90.0, 0.0)
 # 相机设备号 (Pi5 上 /dev/video0 => 0)
 RGB_DEVICE = 0
-# 标记颜色 (夹爪夹着的小黄鱼标定物)
+# 标记颜色 (夹爪夹着的标定物)
 MARKER_COLOR = "yellow"
+
+# 颜色 HSV 阈值表 (BGR->HSV, OpenCV H:0-179 S:0-255 V:0-255)
+# 每个颜色是一组 (lower, upper) 区间列表; 红色跨 0/180 边界需两段。
+MARKER_HSV = {
+    "yellow": [((23, 80, 80), (38, 255, 255))],
+    "red":    [((0, 100, 80), (10, 255, 255)), ((170, 100, 80), (180, 255, 255))],
+    "blue":   [((100, 120, 60), (130, 255, 255))],
+    "green":  [((40, 70, 50), (85, 255, 255))],
+    "orange": [((11, 120, 100), (22, 255, 255))],
+    "purple": [((130, 60, 50), (160, 255, 255))],
+}
 
 
 def generate_grid_points(center, size, z, grid=3, pose=DEFAULT_POSE):
@@ -177,18 +188,18 @@ def detect_red_marker(frame, detector=None):
     """
     自动检测画面中的标记 (夹爪上的标定物)。
     返回最大标记区域的中心像素 (u, v), 找不到返回 None。
-    根据 MARKER_COLOR 选择 HSV 范围。
+    根据 MARKER_COLOR 查 MARKER_HSV 表选择 HSV 范围 (支持多颜色, 红色跨界双区间)。
     """
     import cv2 as _cv2
     import numpy as _np
     # ⚠️ 不用 ColorBlockDetector: 它 min_area=500 会滤掉小黄夹子(≎270px²)。
-    #    直接用调好的 HSV 阈值 (H下限=23, 滤掉噪点)。
+    #    直接用调好的 HSV 阈值。
     hsv = _cv2.cvtColor(_cv2.GaussianBlur(frame, (5, 5), 0), _cv2.COLOR_BGR2HSV)
-    if MARKER_COLOR == "yellow":
-        mask = _cv2.inRange(hsv, _np.array([23, 80, 80]), _np.array([38, 255, 255]))
-    else:  # red
-        mask = _cv2.inRange(hsv, _np.array([0, 100, 80]), _np.array([10, 255, 255]))
-        mask |= _cv2.inRange(hsv, _np.array([170, 100, 80]), _np.array([180, 255, 255]))
+    ranges = MARKER_HSV.get(MARKER_COLOR, MARKER_HSV["yellow"])
+    mask = None
+    for lo, hi in ranges:
+        m = _cv2.inRange(hsv, _np.array(lo), _np.array(hi))
+        mask = m if mask is None else (mask | m)
     mask = _cv2.morphologyEx(mask, _cv2.MORPH_OPEN, _np.ones((3, 3), _np.uint8))
     contours, _ = _cv2.findContours(mask, _cv2.RETR_EXTERNAL, _cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -780,6 +791,7 @@ def pixel_depth_to_robot(u: float, v: float, camera,
 # ─── 主入口 ──────────────────────────────────────────────────
 
 def main():
+    global MARKER_COLOR
     import argparse
     parser = argparse.ArgumentParser(description="Dummy V2 手眼标定")
     parser.add_argument('--verify', action='store_true', help='验证已有标定')
@@ -811,7 +823,13 @@ def main():
                         help='移动后稳定等待秒数 (抓帧前), 默认 1.5; --direct/大跨度移动建议 2.5')
     parser.add_argument('--3d', dest='use_3d', action='store_true',
                         help='3D 手眼标定 (需深度相机): 像素+深度反投影成相机系 3D, 解 4x4 刚体变换, 能抳不同高度物体')
+    parser.add_argument('--color', type=str, default=MARKER_COLOR,
+                        choices=list(MARKER_HSV.keys()),
+                        help=f'标定物颜色 (夹爪夹着的标定物), 可选: {", ".join(MARKER_HSV.keys())} (默认 {MARKER_COLOR})')
     args = parser.parse_args()
+
+    # 应用标定物颜色 (写入全局, detect_red_marker 会查表)
+    MARKER_COLOR = args.color
 
     # 解析工作区参数
     center = DEFAULT_CENTER
