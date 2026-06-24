@@ -389,6 +389,7 @@ class InteractiveCalibrator:
         self.camera = camera
         self.points = points or DEFAULT_CALIBRATION_POINTS
         self.calibration = CalibrationData()
+        self.out_path = None
         self._click_point: Optional[Tuple[int, int]] = None
         self._window_name = "Calibration - Click gripper tip"
 
@@ -431,7 +432,7 @@ class InteractiveCalibrator:
         print("\n计算变换矩阵...")
         if self.calibration.compute():
             print(f"✓ 标定完成！误差: {self.calibration.error_mm:.2f} mm")
-            self.calibration.save()
+            self.calibration.save(self.out_path)
         else:
             print("✗ 标定失败")
 
@@ -498,7 +499,8 @@ class AutoCalibrator:
 
     def __init__(self, robot, camera, points, detector=None,
                  grab_z=DEFAULT_GRAB_Z, settle=1.5, samples=5,
-                 safe_z=280.0, confirm=False, direct_move=False, mode="2d"):
+                 safe_z=280.0, confirm=False, direct_move=False, mode="2d",
+                 out_path=None):
         self.robot = robot
         self.camera = camera
         self.points = points
@@ -506,6 +508,7 @@ class AutoCalibrator:
         self.mode = mode
         self.calibration = CalibrationData(mode=mode)
         self.calibration.grab_z = grab_z
+        self.out_path = out_path
         self.settle = settle      # 移动后稳定等待 (秒)
         self.samples = samples    # 每点采样帧数 (取中值降噪)
         self.safe_z = safe_z      # 安全过渡高度 (点间先抬到这个高度)
@@ -676,7 +679,7 @@ class AutoCalibrator:
                   f"误差 {self.calibration.error_mm:.2f} mm")
             if failed:
                 print(f"  跳过的点: {failed}")
-            self.calibration.save()
+            self.calibration.save(self.out_path)
         else:
             print("✗ 标定失败")
         return self.calibration
@@ -826,6 +829,8 @@ def main():
     parser.add_argument('--color', type=str, default=MARKER_COLOR,
                         choices=list(MARKER_HSV.keys()),
                         help=f'标定物颜色 (夹爪夹着的标定物), 可选: {", ".join(MARKER_HSV.keys())} (默认 {MARKER_COLOR})')
+    parser.add_argument('--out', type=str, default=None,
+                        help='标定结果输出文件 (默认 calibration.json; 建议加后缀区分, 如 calibration_3d.json)')
     args = parser.parse_args()
 
     # 应用标定物颜色 (写入全局, detect_red_marker 会查表)
@@ -893,7 +898,7 @@ def main():
                                  grab_z=args.grab_z, samples=args.samples,
                                  safe_z=args.safe_z, confirm=args.confirm,
                                  direct_move=args.direct, mode=cal_mode,
-                                 settle=args.settle)
+                                 settle=args.settle, out_path=args.out)
             cal.run()
         else:
             # 交互标定 (需要显示器 + 鼠标点击)
@@ -906,6 +911,7 @@ def main():
 
             # 设置 grab_z
             calibrator = InteractiveCalibrator(robot, camera, points)
+            calibrator.out_path = args.out
             calibrator.calibration.grab_z = args.grab_z
             calibrator.run()
 
