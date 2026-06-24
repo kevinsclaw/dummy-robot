@@ -63,7 +63,7 @@ SYSTEM_PROMPT = """你是 Dummy V2 机械臂的智能控制器。
 
 ## 抓取首选 grab_block (重要)
 - 抓取某颜色方块时, **优先用一体化工具 grab_block(color)**, 它已封装好完整 3D 手眼标定抓取流程
-  (多帧检测 -> 深度反投影 -> 3D 标定算 XYZ -> 悬停 -> 下降 -> 闭爪 -> 抬起), 并带好调优补偿 (dx=10, dz=-15)。
+  (多帧检测 -> 深度反投影 -> 3D 标定算 XYZ -> 悬停 -> 下降 -> 闭爪 -> 抬起), 默认不加补偿 (dx=0, dy=0, dz=0), 直接用 3D 标定算出的坐标。
 - grab_block 一步到位, 不需再手动 detect_objects + move_to + close_gripper 拼接。
 - 只有在 grab_block 不适用 (非方块/特殊位姿/需精细控制) 时, 才用 detect_objects + move_to 等原子工具手动编排。
 - 抱另位置偏差, 可调 grab_block 的 dx/dy/dz 补偿; 标定文件变了可传 calib_path。
@@ -373,8 +373,8 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None, hail
         })
 
     @tool
-    def grab_block(color: str = "yellow", dx: float = 10.0, dy: float = 0.0,
-                   dz: float = -15.0, calib_path: str = None,
+    def grab_block(color: str = "yellow", dx: float = 0.0, dy: float = 0.0,
+                   dz: float = 0.0, calib_path: str = None,
                    speed: int = 25) -> str:
         """
         一体化抓取指定颜色的方块 (3D 手眼标定链路, 等价于 _grab_full_3d.py)。
@@ -383,9 +383,9 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None, hail
 
         Args:
             color: 目标颜色方块, 默认 "yellow"
-            dx: X 补偿 mm (机械臂坐标系), 默认 10 (标定调优值)
+            dx: X 补偿 mm (机械臂坐标系), 默认 0 (无补偿)
             dy: Y 补偿 mm, 默认 0
-            dz: Z 补偿 mm, 默认 -15 (落点比 3D 算出的 Z 低 15mm)
+            dz: Z 补偿 mm, 默认 0 (落点用 3D 算出的 Z, 无补偿)
             calib_path: 可选, 指定标定文件路径; 不传则用启动时加载的标定
             speed: 运动速度, 默认 25 (慢速安全)
 
@@ -394,7 +394,7 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None, hail
         """
         import numpy as _np
         APPROACH_DZ = 40.0
-        LIFT_DZ = 50.0
+        LIFT_DZ = 10.0
         POSE = (0.0, 90.0, 0.0)
 
         if not camera:
@@ -503,6 +503,7 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None, hail
         robot.move_cartesian(x, y, z, *POSE)
         robot.close_gripper(); time.sleep(1.5)
         robot.move_cartesian(x, y, z + LIFT_DZ, *POSE)
+        robot.home(); time.sleep(8.0)
 
         return json.dumps({
             "status": "ok",
@@ -511,7 +512,7 @@ def create_agent_tools(robot, camera=None, detector=None, calibration=None, hail
             "compensation": {"dx": dx, "dy": dy, "dz": dz},
             "grab_target_mm": [round(x, 1), round(y, 1), round(z, 1)],
             "calibration": calib_path or "default(loaded)",
-            "note": "夹爪保持闭合, 物体应已抬起",
+            "note": "夹爪保持闭合, 抬起 10mm 后已回 home",
         })
 
     return [detect_objects, move_to, open_gripper, close_gripper, 
