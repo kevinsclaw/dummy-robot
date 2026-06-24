@@ -53,7 +53,7 @@ JOINT_LIMITS = {
 
 # 夹爪参数 (通过 J6 联动)
 GRIPPER_OPEN_ANGLE = -60.0    # J6 角度: 张开
-GRIPPER_CLOSE_ANGLE = 210.0   # J6 角度: 合拢
+GRIPPER_CLOSE_ANGLE = 250.0   # J6 角度: 合拢
 GRIPPER_MAX_ANGLE = 90.0      # J6 最大角度
 
 
